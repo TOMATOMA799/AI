@@ -1,0 +1,46 @@
+.tooltip
+  display: inline-flex
+
+.tooltip-content
+  position: fixed
+  z-index: 100
+  width: max-content
+  max-width: 220px
+  padding: 6px 10px
+  background: linear-gradient(var(--color-surface-elevated), var(--color-surface-elevated)) padding-box, var(--gradient-border) border-box
+  border: 1px solid transparent
+  border-radius: var(--border-radius-md)
+  color: var(--color-text)
+  font-size: var(--font-size-sm)
+  font-weight: var(--font-weight-semi-bold)
+  opacity: 0
+  pointer-events: none
+  transition: opacity var(--transition-duration-main) var(--transition-timing-main), transform var(--transition-duration-main) var(--transition-timing-main)
+  white-space: nowrap
+
+.tooltip-content-open
+  opacity: 1
+
+.tooltip-content-top
+  transform: translate3d(-50%, 4px, 0)
+
+  &.tooltip-content-open
+    transform: translate3d(-50%, 0, 0)
+
+.tooltip-content-right
+  transform: translate3d(-4px, -50%, 0)
+
+  &.tooltip-content-open
+    transform: translate3d(0, -50%, 0)
+
+.tooltip-content-bottom
+  transform: translate3d(-50%, -4px, 0)
+
+  &.tooltip-content-open
+    transform: translate3d(-50%, 0, 0)
+
+.tooltip-content-left
+  transform: translate3d(4px, -50%, 0)
+
+  &.tooltip-content-open
+    transform: translate3d(0, -50%, 0)

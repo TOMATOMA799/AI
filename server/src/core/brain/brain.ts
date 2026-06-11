@@ -2,17 +2,18 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { ShortLanguageCode } from '@/types'
+import type { LLMAnswerMetrics, ShortLanguageCode } from '@/types'
 import type { GlobalAnswersSchema } from '@/schemas/global-data-schemas'
 import type { NLUProcessResult } from '@/core/nlp/types'
 import type { SkillAnswerConfigSchema } from '@/schemas/skill-schemas'
 import type { BrainProcessResult } from '@/core/brain/types'
 import { SkillActionTypes } from '@/core/brain/types'
-import { HAS_TTS } from '@/constants'
+import { GLOBAL_DATA_PATH, HAS_TTS } from '@/constants'
 import {
   CONVERSATION_LOGGER,
-  LLM_MANAGER,
   NLU,
+  POST_TURN_MAINTENANCE_QUEUE,
+  SELF_MODEL_MANAGER,
   SOCKET_SERVER,
   TTS
 } from '@/core'
@@ -22,23 +23,42 @@ import { ParaphraseLLMDuty } from '@/core/llm-manager/llm-duties/paraphrase-llm-
 import { AnswerQueue } from '@/core/brain/answer-queue'
 import { LogicActionSkillHandler } from '@/core/brain/logic-action-skill-handler'
 import { DialogActionSkillHandler } from '@/core/brain/dialog-action-skill-handler'
+import { CONVERSATION_SESSION_MANAGER } from '@/core/session-manager'
 
 type SkillProcess = ChildProcessWithoutNullStreams | undefined
 interface IsTalkingWithVoiceOptions {
   shouldInterrupt?: boolean
 }
 
+type QueuedAnswer =
+  | SkillAnswerConfigSchema
+  | {
+      speech: string
+      text?: string
+      llmMetrics?: LLMAnswerMetrics
+      shouldSkipParaphrase?: boolean
+    }
+
+interface QueuedSuggestions {
+  type: 'suggest'
+  suggestions: string[]
+}
+
+type QueuedOutput = QueuedAnswer | QueuedSuggestions
+
 const MIN_NB_OF_WORDS_TO_USE_LLM_NLG = 5
+const ESTIMATED_CHARS_PER_TOKEN = 4
+const MAX_PARAPHRASE_INPUT_TOKENS = 1_024
 
 export default class Brain {
   private static instance: Brain
   private _lang: ShortLanguageCode = 'en'
   private _isTalkingWithVoice = false
-  private answerQueue = new AnswerQueue<SkillAnswerConfigSchema>()
+  private answerQueue = new AnswerQueue<QueuedOutput>()
   private answerQueueProcessTimerId: NodeJS.Timeout | undefined = undefined
   private broca: GlobalAnswersSchema = JSON.parse(
     fs.readFileSync(
-      path.join(process.cwd(), 'core', 'data', this._lang, 'answers.json'),
+      path.join(GLOBAL_DATA_PATH, this._lang, 'answers.json'),
       'utf8'
     )
   )
@@ -132,7 +152,7 @@ export default class Brain {
     // Update broca
     this.broca = JSON.parse(
       fs.readFileSync(
-        path.join(process.cwd(), 'core', 'data', this._lang, 'answers.json'),
+        path.join(GLOBAL_DATA_PATH, this._lang, 'answers.json'),
         'utf8'
       )
     )
@@ -177,12 +197,29 @@ export default class Brain {
        * Leon is starting to type another message just after sending the previous one
        */
       setTimeout(() => {
-        SOCKET_SERVER.socket?.emit('is-typing', true)
+        SOCKET_SERVER.emitToChatClients('is-typing', true)
       }, naturalStartTypingDelay)
       // Next answer to handle
       const answer = this.answerQueue.pop()
+      if (answer && typeof answer === 'object' && 'type' in answer) {
+        if (answer.type === 'suggest') {
+          SOCKET_SERVER.emitToChatClients('suggest', answer.suggestions)
+        }
+
+        continue
+      }
+
       let textAnswer: string | undefined = ''
       let speechAnswer = ''
+      const llmMetrics =
+        answer && typeof answer === 'object' && 'llmMetrics' in answer
+          ? answer.llmMetrics
+          : undefined
+      const shouldSkipParaphrase =
+        answer &&
+        typeof answer === 'object' &&
+        'shouldSkipParaphrase' in answer &&
+        answer.shouldSkipParaphrase === true
 
       if (answer && answer !== '') {
         textAnswer = typeof answer === 'string' ? answer : answer.text
@@ -191,19 +228,14 @@ export default class Brain {
         const { actionConfig: currentActionConfig } = NLU.nluResult
         const hasLoopConfig = !!currentActionConfig?.loop
         const hasSlotsConfig = !!currentActionConfig?.slots
-        const isLLMNLGDisabled = !!currentActionConfig?.disable_llm_nlg
-
         /**
-         * Only use LLM NLG if:
-         * - It is not specifically disabled in the action config
-         * - It is enabled in general
-         * - The current action does not have a loop neither slots configuration
+         * Only use answer paraphrasing if the current action does not have
+         * a loop neither slots configuration
          * (Because sometimes the LLM will not be able to generate a meaningful text,
          * and it will mislead the conversation)
          */
         if (
-          !isLLMNLGDisabled &&
-          LLM_MANAGER.isLLMNLGEnabled &&
+          NLU.currentResponseRoute !== 'react' &&
           !hasLoopConfig &&
           !hasSlotsConfig
         ) {
@@ -212,13 +244,20 @@ export default class Brain {
             typeof answer === 'string' ||
             answer.speech
           ) {
-            /**
-             * Only use LLM NLG if the answer is not too short
-             * otherwise it will be too hard for the model to generate a meaningful text
-             */
+            // Keep paraphrasing for substantive answers only.
             const textToParaphrase = textAnswer ?? speechAnswer
             const nbOfWords = String(textToParaphrase).split(' ').length
-            if (nbOfWords >= MIN_NB_OF_WORDS_TO_USE_LLM_NLG) {
+            const estimatedInputTokens = Math.ceil(
+              String(textToParaphrase).length / ESTIMATED_CHARS_PER_TOKEN
+            )
+
+            // Skip paraphrasing for deterministic errors and oversized answers
+            // so workflow responses stay fast on smaller local models.
+            if (
+              !shouldSkipParaphrase &&
+              nbOfWords >= MIN_NB_OF_WORDS_TO_USE_LLM_NLG &&
+              estimatedInputTokens <= MAX_PARAPHRASE_INPUT_TOKENS
+            ) {
               const paraphraseDuty = new ParaphraseLLMDuty({
                 input: textToParaphrase
               })
@@ -265,12 +304,53 @@ export default class Brain {
          * It may happen that only a speech is needed
          */
         if (textAnswer) {
-          SOCKET_SERVER.socket?.emit('answer', textAnswer)
+          const finalTextAnswer = textAnswer
+          const recentConversationLogs = await CONVERSATION_LOGGER.load({
+            nbOfLogsToLoad: 12
+          })
+          const ownerMessage =
+            [...recentConversationLogs]
+              .reverse()
+              .find((log) => log.who === 'owner')?.message ||
+            NLU.nluResult.utterance ||
+            ''
+          const sentAt = Date.now()
+
+          SOCKET_SERVER.emitAnswerToChatClients(
+            llmMetrics
+              ? {
+                  answer: finalTextAnswer,
+                  llmMetrics
+                }
+              : finalTextAnswer
+          )
+
+          if (NLU.currentResponseRoute !== 'react') {
+            POST_TURN_MAINTENANCE_QUEUE.enqueue(
+              'controlled self-model reflection',
+              () => SELF_MODEL_MANAGER.observeTurn({
+                userMessage: ownerMessage,
+                assistantMessage: finalTextAnswer,
+                sentAt,
+                route: 'controlled',
+                finalIntent: 'answer'
+              })
+            )
+          }
 
           await CONVERSATION_LOGGER.push({
             who: 'leon',
-            message: textAnswer
+            message: finalTextAnswer,
+            isAddedToHistory: true,
+            ...(llmMetrics ? { llmMetrics } : {})
           })
+          POST_TURN_MAINTENANCE_QUEUE.enqueue(
+            'session title generation',
+            () => CONVERSATION_SESSION_MANAGER.generateTitleFromFirstMessage(
+              CONVERSATION_SESSION_MANAGER.getCurrentSessionId(),
+              ownerMessage
+            )
+          )
         }
 
         // SOCKET_SERVER.socket?.emit('is-typing', false)
@@ -291,7 +371,7 @@ export default class Brain {
 
     this.answerQueue.isProcessing = false
     setTimeout(() => {
-      SOCKET_SERVER.socket?.emit('is-typing', false)
+      SOCKET_SERVER.emitToChatClients('is-typing', false)
     }, naturalStartTypingDelay)
   }
 
@@ -306,7 +386,7 @@ export default class Brain {
    * Make Leon talk by adding the answer to the answer queue
    */
   public async talk(
-    answer: SkillAnswerConfigSchema,
+    answer: QueuedAnswer,
     end = false
   ): Promise<void> {
     LogHelper.title('Brain')
@@ -318,14 +398,28 @@ export default class Brain {
     }
 
     this.answerQueue.push(answer)
-    /**
-     * If the answer queue is not processing and not empty,
-     * then process the queue,
-     * otherwise clean up the new answer queue timer right away to not have multiple timers running
-     */
+
+    if (!this.answerQueue.isProcessing && !this.answerQueue.isEmpty()) {
+      await this.processAnswerQueue(end)
+    }
+  }
+
+  /**
+   * Queue suggestions so they are emitted after any preceding answers.
+   */
+  public suggest(suggestions: string[]): void {
+    if (suggestions.length === 0) {
+      return
+    }
+
+    this.answerQueue.push({
+      type: 'suggest',
+      suggestions
+    })
+
     const answerTimerCheckerId = setInterval(() => {
       if (!this.answerQueue.isProcessing && !this.answerQueue.isEmpty()) {
-        this.processAnswerQueue(end)
+        this.processAnswerQueue()
       } else {
         this.cleanUpAnswerQueueTimer(answerTimerCheckerId)
       }
@@ -380,7 +474,7 @@ export default class Brain {
       const speech = `${this.wernicke('random_not_sure')}.`
 
       this.talk(speech, true)
-      SOCKET_SERVER.socket?.emit('ask-to-repeat', nluResult)
+      SOCKET_SERVER.emitToChatClients('ask-to-repeat', nluResult)
     }
   }*/
 
@@ -441,7 +535,7 @@ export default class Brain {
         }" skill: ${String(e)}`
       )
 
-      this.speakSkillError()
+      this.speakSkillError(String(e))
 
       return {
         executionTime
@@ -452,10 +546,14 @@ export default class Brain {
   /**
    * Speak about an error happened regarding a specific skill
    */
-  public speakSkillError(): void {
-    const speech = `${this.wernicke('random_skill_errors', '', {
+  public speakSkillError(reason?: string): void {
+    const fallbackSpeech = `${this.wernicke('random_skill_errors', '', {
       '{{ skill_name }}': this._skillFriendlyName
     })}!`
+    const formattedReason = reason?.trim()
+    const speech = formattedReason
+      ? `${fallbackSpeech} Reason: ${formattedReason}`
+      : fallbackSpeech
 
     if (!this.isMuted) {
       this.talk(speech)

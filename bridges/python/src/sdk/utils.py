@@ -9,6 +9,7 @@ import subprocess
 
 HUGGING_FACE_URL = 'https://huggingface.co'
 HUGGING_FACE_MIRROR_URL = 'https://hf-mirror.com'
+ZIP_ARCHIVE_EXTENSIONS = {'.zip', '.whl'}
 
 
 def can_access_hugging_face() -> bool:
@@ -79,6 +80,26 @@ def format_file_paths(file_paths: List[str]) -> str:
         format_file_paths(['/path1', '/path2']) # returns '[FILE_PATH]/path1[/FILE_PATH], [FILE_PATH]/path2[/FILE_PATH]'
     """
     return ', '.join(format_file_path(path) for path in file_paths)
+
+
+def normalize_language_code(value: str) -> Optional[str]:
+    """Normalize a language input to an ISO 639-1 code.
+
+    Supports direct language codes and locale tags such as ``fr-FR``.
+    Returns ``None`` when the input is not a supported code-like value.
+    """
+    trimmed_value = value.strip()
+
+    if not trimmed_value:
+        return None
+
+    normalized_value = trimmed_value.replace('_', '-').lower()
+    language = normalized_value.split('-', 1)[0].strip()
+
+    if len(language) == 2 and language.isalpha():
+        return language
+
+    return None
 
 
 def get_platform_name() -> str:
@@ -266,21 +287,23 @@ def extract_archive(
     basename = os.path.basename(archive_path).lower()
     
     try:
-        if ext == '.zip':
-            # Use unzip for .zip files (available on all platforms)
-            # -o: overwrite files without prompting
-            # -q: quiet mode
-            # -d: extract to directory
-            subprocess.run(
-                ['unzip', '-o', '-q', archive_path, '-d', target_path],
-                check=True,
-                capture_output=True
-            )
+        if ext in ZIP_ARCHIVE_EXTENSIONS:
+            if is_windows():
+                subprocess.run(
+                    ['tar', '-xf', archive_path, '-C', target_path],
+                    check=True,
+                    capture_output=True
+                )
+            else:
+                subprocess.run(
+                    ['unzip', '-o', '-q', archive_path, '-d', target_path],
+                    check=True,
+                    capture_output=True
+                )
         elif (basename.endswith('.tar.gz') or 
               basename.endswith('.tar.xz') or 
               basename.endswith('.tgz') or 
               ext == '.tar'):
-            # Use tar for .tar.* files (available on all platforms)
             tar_args = ['tar', '-xf', archive_path, '-C', target_path]
             if strip_components and strip_components > 0:
                 tar_args.append(f'--strip-components={strip_components}')

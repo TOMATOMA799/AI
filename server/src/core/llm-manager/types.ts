@@ -9,14 +9,12 @@ import type {
 import type { MessageLog } from '@/types'
 
 export enum LLMDuties {
-  ActionRecognition = 'action-recognition',
+  Inference = 'inference',
   SkillRouter = 'skill-router',
   ActionCalling = 'action-calling',
   SlotFilling = 'slot-filling',
-  CustomNER = 'custom-ner',
   Paraphrase = 'paraphrase',
-  Conversation = 'conversation',
-  Custom = 'custom'
+  ReAct = 'react'
   // TODO
   /*SentimentAnalysis = 'sentiment-analysis',
   QuestionAnswering = 'question-answering',
@@ -27,7 +25,16 @@ export enum LLMDuties {
 
 export enum LLMProviders {
   Local = 'local',
-  Groq = 'groq'
+  LlamaCPP = 'llamacpp',
+  SGLang = 'sglang',
+  Groq = 'groq',
+  OpenRouter = 'openrouter',
+  ZAI = 'zai',
+  OpenAI = 'openai',
+  Anthropic = 'anthropic',
+  MoonshotAI = 'moonshotai',
+  Cerebras = 'cerebras',
+  HuggingFace = 'huggingface'
 }
 
 export enum ActionCallingStatus {
@@ -42,6 +49,55 @@ export enum SlotFillingStatus {
 
 export type PromptOrChatHistory = string | ChatHistoryItem[]
 
+/**
+ * OpenAI-compatible tool definition for remote providers that support
+ * native tool/function calling (e.g. OpenRouter).
+ */
+export interface OpenAIToolFunction {
+  name: string
+  description?: string
+  parameters: Record<string, unknown>
+}
+export interface OpenAITool {
+  type: 'function'
+  function: OpenAIToolFunction
+}
+export type OpenAIToolChoice =
+  | 'none'
+  | 'auto'
+  | 'required'
+  | {
+      type: 'function'
+      function: {
+        name: string
+      }
+    }
+
+/**
+ * Represents a tool call returned by the model when using native tool calling.
+ */
+export interface OpenAIToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
+export type LLMReasoningMode = 'off' | 'guarded' | 'on'
+export type LLMReasoningSummary = 'auto' | 'detailed'
+export type LLMTextVerbosity = 'low' | 'medium' | 'high'
+export type LLMPromptCacheRetention = 'in_memory' | '24h'
+export type LLMServiceTier = 'auto' | 'flex' | 'priority' | 'default'
+
+export interface LLMPromptAbortReason {
+  shouldRetry: boolean
+  retryStrategy: 'timeout'
+  source: 'react_tool_call_diagnosis'
+  delayMs: number
+}
+
 export interface CompletionParams {
   dutyType: LLMDuties
   systemPrompt: string
@@ -50,12 +106,54 @@ export interface CompletionParams {
   grammar?: string
   temperature?: number | undefined
   timeout?: number
+  signal?: AbortSignal
   maxRetries?: number
   session?: LlamaChatSession | LlamaChat | null
   functions?: ChatSessionModelFunctions | undefined
   data?: Record<string, unknown> | null
   history?: MessageLog[]
-  onToken?: (tokens: Token[]) => void
+  onToken?: (tokens: Token[] | string) => void
+  onReasoningToken?: (reasoningChunk: string) => void
+  shouldStream?: boolean
+  /**
+   * Optional provider hint to disable thinking/reasoning for a request.
+   * The core may also enable this proactively for compatibility when
+   * tool_choice is forced.
+   */
+  disableThinking?: boolean
+  /**
+   * Optional provider-agnostic reasoning mode for remote providers.
+   * This is more expressive than the legacy disableThinking boolean.
+   */
+  reasoningMode?: LLMReasoningMode
+  reasoningSummary?: LLMReasoningSummary | undefined
+  textVerbosity?: LLMTextVerbosity | undefined
+  promptCacheKey?: string | undefined
+  promptCacheRetention?: LLMPromptCacheRetention | undefined
+  serviceTier?: LLMServiceTier | undefined
+  /**
+   * Optional compatibility flag to relax a forced tool_choice into `auto`
+   * for providers that reject specified tool_choice values.
+   */
+  relaxForcedToolChoice?: boolean
+  /**
+   * When false, provider prompt failures are kept local to the caller:
+   * no user-facing error talk and no mutation of the global last-provider-error
+   * state. Useful for background/auxiliary inferences.
+   */
+  trackProviderErrors?: boolean
+  /**
+   * Internal retry budget for remote provider failures handled by the central
+   * LLM provider wrapper.
+   */
+  remoteProviderErrorRetries?: number
+  /**
+   * OpenAI-compatible tools for remote providers that support native
+   * tool/function calling. When set, the provider sends these as `tools`
+   * in the API request instead of (or in addition to) JSON mode.
+   */
+  tools?: OpenAITool[]
+  toolChoice?: OpenAIToolChoice
 }
 
 /**

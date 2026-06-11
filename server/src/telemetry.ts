@@ -21,7 +21,7 @@ import {
   LEON_VERSION,
   NODEJS_BRIDGE_VERSION,
   PYTHON_BRIDGE_VERSION,
-  STT_PROVIDER,
+  ASR_PROVIDER,
   PYTHON_TCP_SERVER_VERSION,
   TTS_PROVIDER
 } from '@/constants'
@@ -70,7 +70,7 @@ export class Telemetry {
           isProduction: IS_PRODUCTION_ENV,
           isGitpod: IS_GITPOD,
           language: LANG,
-          sttProvider: STT_PROVIDER,
+          asrProvider: ASR_PROVIDER,
           ttsProvider: TTS_PROVIDER,
           coreVersion: LEON_VERSION,
           nodeJSBridgeVersion: NODEJS_BRIDGE_VERSION,
@@ -150,10 +150,8 @@ export class Telemetry {
             utterance,
             entities
           } = processedData as NLUResult
-          const skill = await SkillDomainHelper.getSkillInfo(
-            triggeredDomain,
-            triggeredSkill
-          )
+          const skill =
+            await SkillDomainHelper.getNewSkillConfig(triggeredSkill)
 
           await this.axios.post('/on-utterance', {
             instanceID: this.instanceID,
@@ -167,8 +165,8 @@ export class Telemetry {
               executionTime: processedData?.executionTime || 0,
               nluProcessingTime: processedData?.nluProcessingTime || 0,
               value: this.anonymizeEntities(utterance, entities) || utterance,
-              triggeredSkillVersion: skill.version || null,
-              triggeredSkillBridge: skill.bridge || null
+              triggeredSkillVersion: skill?.version || null,
+              triggeredSkillBridge: skill?.bridge || null
             }
           })
         } else if (JSON.stringify(processedData) !== JSON.stringify({})) {

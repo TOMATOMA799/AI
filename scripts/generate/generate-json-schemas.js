@@ -1,13 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { LogHelper } from '@/helpers/log-helper'
 import {
   domainSchemaObject,
   skillSchemaObject,
   skillConfigSchemaObject,
   skillLocaleConfigObject
 } from '@/schemas/skill-schemas'
+import { toolManifestSchemaObject } from '@/schemas/tool-schemas'
+import { toolkitSchemaObject } from '@/schemas/toolkit-schemas'
 import {
   globalEntitySchemaObject,
   globalResolverSchemaObject,
@@ -18,6 +19,9 @@ import {
   googleCloudVoiceConfiguration,
   watsonVoiceConfiguration
 } from '@/schemas/voice-config-schemas'
+import { configSchemaObject } from '@/schemas/core-schemas'
+
+import { createSetupStatus } from '../setup/setup-status'
 
 /**
  * Generate JSON schemas
@@ -47,9 +51,13 @@ export const generateSchemas = async (categoryName, schemas) => {
 }
 
 export default async () => {
-  LogHelper.info('Generating the JSON schemas...')
+  const status = createSetupStatus('Generating JSON schemas...').start()
 
   await Promise.all([
+    generateSchemas(
+      'core-schemas',
+      new Map([['config', configSchemaObject]])
+    ),
     generateSchemas(
       'global-data',
       new Map([
@@ -68,6 +76,14 @@ export default async () => {
       ])
     ),
     generateSchemas(
+      'tool-schemas',
+      new Map([['tool', toolManifestSchemaObject]])
+    ),
+    generateSchemas(
+      'toolkit-schemas',
+      new Map([['toolkit', toolkitSchemaObject]])
+    ),
+    generateSchemas(
       'voice-config-schemas',
       new Map([
         ['amazon', amazonVoiceConfiguration],
@@ -78,5 +94,5 @@ export default async () => {
     )
   ])
 
-  LogHelper.success('JSON schemas generated')
+  status.succeed('JSON schemas: ready')
 }

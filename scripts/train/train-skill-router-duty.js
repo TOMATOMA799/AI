@@ -1,7 +1,7 @@
 import fs from 'node:fs'
+import path from 'node:path'
 
 import { LLM_SKILL_ROUTER_DUTY_SKILL_LIST_PATH } from '@/constants'
-import { LogHelper } from '@/helpers/log-helper'
 import { SkillDomainHelper } from '@/helpers/skill-domain-helper'
 
 /**
@@ -9,8 +9,6 @@ import { SkillDomainHelper } from '@/helpers/skill-domain-helper'
  */
 export default () =>
   new Promise(async (resolve, reject) => {
-    LogHelper.title('Skill router duty training')
-
     try {
       const friendlyPrompts = await SkillDomainHelper.listSkillFriendlyPrompts()
       const formattedFriendlyPrompts = friendlyPrompts
@@ -19,6 +17,10 @@ export default () =>
         })
         .join('\n')
 
+      await fs.promises.mkdir(
+        path.dirname(LLM_SKILL_ROUTER_DUTY_SKILL_LIST_PATH),
+        { recursive: true }
+      )
       await fs.promises.writeFile(
         LLM_SKILL_ROUTER_DUTY_SKILL_LIST_PATH,
         formattedFriendlyPrompts
@@ -26,7 +28,6 @@ export default () =>
 
       resolve()
     } catch (e) {
-      LogHelper.error(`Failed to train skill router duty: ${e}`)
       reject(e)
     }
   })

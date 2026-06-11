@@ -3,9 +3,43 @@ import path from 'node:path'
 import { FileHelper } from '@/helpers/file-helper'
 
 import type { ActionFunction, ActionParams } from '@sdk/types'
-import { INTENT_OBJECT } from '@bridge/constants'
+import { INTENT_OBJECT, SKILL_PATH } from '@bridge/constants'
 import { ParamsHelper } from '@sdk/params-helper'
-;(async (): Promise<void> => {
+import { leon } from '@sdk/leon'
+import { setToolReporter } from '@sdk/tool-reporter'
+
+const resolveActionFunction = (actionModule: unknown): ActionFunction | null => {
+  if (!actionModule || typeof actionModule !== 'object') {
+    return null
+  }
+
+  const moduleObject = actionModule as Record<string, unknown>
+
+  if (typeof moduleObject['run'] === 'function') {
+    return moduleObject['run'] as ActionFunction
+  }
+
+  const defaultExport =
+    moduleObject['default'] && typeof moduleObject['default'] === 'object'
+      ? (moduleObject['default'] as Record<string, unknown>)
+      : null
+
+  if (defaultExport && typeof defaultExport['run'] === 'function') {
+    return defaultExport['run'] as ActionFunction
+  }
+
+  if (typeof moduleObject['default'] === 'function') {
+    return moduleObject['default'] as ActionFunction
+  }
+
+  return null
+}
+
+async function main(): Promise<void> {
+  setToolReporter(async (input) => {
+    await leon.answer(input)
+  })
+
   const {
     lang,
     sentiment,
@@ -35,15 +69,20 @@ import { ParamsHelper } from '@sdk/params-helper'
   try {
     const actionModule = await FileHelper.dynamicImportFromFile(
       path.join(
-        process.cwd(),
-        'skills',
-        skill_name,
+        SKILL_PATH,
         'src',
         'actions',
         `${action_name}.ts`
       )
     )
-    const actionFunction: ActionFunction = actionModule.run
+    const actionFunction = resolveActionFunction(actionModule)
+
+    if (!actionFunction) {
+      throw new TypeError(
+        `Action "${skill_name}:${action_name}" does not export a runnable action function`
+      )
+    }
+
     const paramsHelper = new ParamsHelper(params)
 
     await actionFunction(params, paramsHelper)
@@ -53,4 +92,6 @@ import { ParamsHelper } from '@sdk/params-helper'
       e
     )
   }
-})()
+}
+
+void main()

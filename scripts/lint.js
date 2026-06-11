@@ -1,33 +1,23 @@
-import { command } from 'execa'
+import execa from 'execa'
 
 import { LogHelper } from '@/helpers/log-helper'
 import { LoaderHelper } from '@/helpers/loader-helper'
 
+import buildAurora from './build-aurora.js'
+
 const globs = [
-  '"app/src/js/*.{ts,js}"',
+  'app/src/js/*.{ts,js}',
+  'aurora/src/**/*.{ts,tsx,js,jsx}',
+  'web-app/src/**/*.{ts,tsx}',
+  'web-app/vite.config.ts',
   // TODO: deal with it once handling new hotword
   // '"hotword/index.{ts,js}"',
-  // TODO: put it back once tests have been reintroduced into skills
-  // '"skills/**/*.js"',
-  '"scripts/**/*.{ts,js}"',
-  '"server/src/**/*.{ts,js}"'
-  // TODO: put it back once tests need to be written
-  /*'"test/!*.js"',
-  '"test/e2e/!**!/!*.js"',
-  '"test/json/!**!/!*.js"',
-  '"test/unit/!**!/!*.js"'*/
+  'skills/**/*.{ts,js}',
+  'scripts/**/*.{ts,js}',
+  'server/src/**/*.{ts,js}',
+  'test/**/*.{ts,js}',
+  'tools/**/*.ts'
 ]
-const src = globs.join(' ')
-
-async function prettier() {
-  await command('prettier --write . --ignore-pattern .gitignore', {
-    shell: true
-  })
-  await command(`prettier --check ${src} --ignore-pattern .gitignore`, {
-    shell: true,
-    stdio: 'inherit'
-  })
-}
 
 /**
  * This script ensures the correct coding syntax of the whole project
@@ -37,13 +27,16 @@ async function prettier() {
   LogHelper.info('Linting...')
 
   try {
-    await Promise.all([
-      prettier(),
-      command(`eslint ${src} --ignore-pattern .gitignore`, {
-        shell: true,
-        stdio: 'inherit'
-      })
-    ])
+    await buildAurora({ quiet: true })
+    await execa('eslint', [...globs, '--fix', '--ignore-pattern', '.gitignore'], {
+      stdio: 'inherit'
+    })
+    await execa('tsc', ['--noEmit', '-p', 'tsconfig.json'], {
+      stdio: 'inherit'
+    })
+    await execa('tsc', ['--noEmit', '-p', 'web-app/tsconfig.json'], {
+      stdio: 'inherit'
+    })
 
     LogHelper.success('Looks great')
     LoaderHelper.stop()

@@ -3,35 +3,30 @@ import { EventEmitter } from 'node:events'
 import {
   HOST,
   PORT,
+  PROFILE_CONVERSATION_LOG_PATH,
   PYTHON_TCP_SERVER_HOST,
-  PYTHON_TCP_SERVER_PORT,
-  PYTHON_TCP_SERVER_LD_LIBRARY_PATH
+  PYTHON_TCP_SERVER_PORT
 } from '@/constants'
 import TCPClient from '@/core/tcp-client'
 import HTTPServer from '@/core/http-server/http-server'
 import SocketServer from '@/core/socket-server'
-import SpeechToText from '@/core/stt/stt'
+import ASRProvider from '@/core/asr/asr-provider'
 import TextToSpeech from '@/core/tts/tts'
 import AutomaticSpeechRecognition from '@/core/asr/asr'
-import NamedEntityRecognition from '@/core/nlp/nlu/ner'
-import ModelLoader from '@/core/nlp/nlu/model-loader'
 import NaturalLanguageUnderstanding from '@/core/nlp/nlu/nlu'
 import Brain from '@/core/brain/brain'
 import LLMManager from '@/core/llm-manager/llm-manager'
 import LLMProvider from '@/core/llm-manager/llm-provider'
 import Persona from '@/core/llm-manager/persona'
+import ToolkitRegistry from '@/core/toolkit-registry'
+import ContextManager from '@/core/context-manager'
+import MemoryManager from '@/core/memory-manager'
+import SelfModelManager from '@/core/self-model-manager'
+import PulseManager from '@/core/pulse-manager'
+import PostTurnMaintenanceQueue from '@/core/post-turn-maintenance-queue'
+import ToolExecutor from '@/core/tool-executor'
 import { ConversationLogger } from '@/conversation-logger'
-import { SystemHelper } from '@/helpers/system-helper'
-import { LogHelper } from '@/helpers/log-helper'
-
-/**
- * Set environment variables
- */
-
-if (SystemHelper.isLinux()) {
-  process.env['LD_LIBRARY_PATH'] = PYTHON_TCP_SERVER_LD_LIBRARY_PATH
-  LogHelper.info(`LD_LIBRARY_PATH set to: ${process.env['LD_LIBRARY_PATH']}`)
-}
+import { ToolCallLogger } from '@/tool-call-logger'
 
 /**
  * Register core nodes
@@ -56,31 +51,37 @@ export const LLM_MANAGER = new LLMManager()
 export const CONVERSATION_LOGGER = new ConversationLogger({
   loggerName: 'Conversation Logger',
   fileName: 'conversation_log.json',
-  nbOfLogsToKeep: 512,
-  nbOfLogsToLoad: 96
+  filePath: PROFILE_CONVERSATION_LOG_PATH,
+  nbOfLogsToKeep: 1_024,
+  nbOfLogsToLoad: 256
 })
-export const LOOP_CONVERSATION_LOGGER = new ConversationLogger({
-  loggerName: 'Loop Conversation Logger',
-  fileName: 'loop_conversation_log.json',
-  nbOfLogsToKeep: 512,
-  nbOfLogsToLoad: 96
+export const TOOL_CALL_LOGGER = new ToolCallLogger({
+  loggerName: 'Tool Call Logger',
+  fileName: 'tool-calls.json',
+  nbOfLogsToKeep: 8
 })
 
 export const HTTP_SERVER = new HTTPServer(String(HOST), PORT)
 
 export const SOCKET_SERVER = new SocketServer()
 
+export const TOOLKIT_REGISTRY = new ToolkitRegistry()
+
+export const TOOL_EXECUTOR = new ToolExecutor()
+
 export const PERSONA = new Persona()
 
-export const STT = new SpeechToText()
+export const CONTEXT_MANAGER = new ContextManager()
+export const MEMORY_MANAGER = new MemoryManager()
+export const SELF_MODEL_MANAGER = new SelfModelManager()
+export const PULSE_MANAGER = new PulseManager()
+export const POST_TURN_MAINTENANCE_QUEUE = new PostTurnMaintenanceQueue()
+
+export const ASR_ENGINE = new ASRProvider()
 
 export const TTS = new TextToSpeech()
 
 export const ASR = new AutomaticSpeechRecognition()
-
-export const NER = new NamedEntityRecognition()
-
-export const MODEL_LOADER = new ModelLoader()
 
 export const NLU = new NaturalLanguageUnderstanding()
 

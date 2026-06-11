@@ -25,6 +25,11 @@
       "Sorry, I don't understand your query",
       "Sorry, I'm still very young, I didn't get your point"
     ],
+    "skill_not_found_offer_create": [
+      "I don't have a skill for that yet, but I can develop it for you right now.",
+      "That skill doesn't exist yet, but I can create it for you now.",
+      "I don't have this skill yet. I can build it for you right away."
+    ],
     "random_not_sure": [
       "Sorry, you may repeat in an another way",
       "Sorry, I'm not sure I understood correctly",
@@ -35,10 +40,6 @@
     "random_not_able": [
       "Sorry, I'm not able to answer. I understand what you said, but please repeat in another way",
       "Sorry, I have a blackout, I cannot answer that. I understand what you said, but try to repeat in another way"
-    ],
-    "random_ner_type_not_supported": [
-      "Sorry, the \"%entity_type%\" action entity type is not supported by my NER. Please <a href=\"https://github.com/leon-ai/leon/issues\" target=\"_blank\">open an issue</a> to report, that will be much appreciated",
-      "Sorry, my NER does not recognize the \"%entity_type%\" action entity type. Please <a href=\"https://github.com/leon-ai/leon/issues\" target=\"_blank\">open an issue</a> to report, it'll be highly appreciated"
     ],
     "random_language_switch": [
       "Hey, it looks like a new language, give me a sec so I make the switch",
@@ -61,6 +62,12 @@
       "I can't fulfill this request because my large language model is not enabled",
       "Sorry, I need my large language model to answer this request, but it's not enabled",
       "My large language model is not enabled, so I can't answer this request"
+    ],
+    "llm_provider_http_error": [
+      "{{ provider }} provider: error to complete prompt: {{ error }}{{ api_error }}"
+    ],
+    "llm_remote_provider_error": [
+      "I hit an error with the remote {{ provider }} provider while completing the inference: {{ error }}{{ api_error }}"
     ],
     "action_loop_stopped": [
       "Sure, let me know if you need anything else",
@@ -96,6 +103,11 @@
       "Retrieving {{ binary_name }} executable file.",
       "{{ binary_name }} is being downloaded, this may take a moment.",
       "Hang tight, I'm getting the {{ binary_name }} binary for you."
+    ],
+    "bridges.tools.missing_settings": [
+      "I need to use the {{ tool_name }} tool. There are missing settings: {{ missing }}. Please update {{ settings_path }} and try again.",
+      "Since I need to use the {{ tool_name }} tool, I can't proceed without {{ missing }}. Please update {{ settings_path }} and try again.",
+      "{{ tool_name }} tool settings missing: {{ missing }}. Please edit {{ settings_path }} file and try again."
     ],
     "bridges.tools.binary_downloaded": [
       "{{ binary_name }} binary downloaded successfully.",
@@ -157,6 +169,18 @@
       "Downloading binary data...",
       "Getting binary file from server..."
     ],
+    "bridges.tools.download_progress": [
+      "Downloading {{ file_name }}: {{ percentage }}%.",
+      "Download progress for {{ file_name }}: {{ percentage }}%."
+    ],
+    "bridges.tools.download_progress_with_details": [
+      "Downloading {{ file_name }}: {{ percentage }}% at {{ speed }} (ETA: {{ eta }}) [{{ downloaded_size }}/{{ total_size }}].",
+      "Download progress for {{ file_name }}: {{ percentage }}% at {{ speed }} (ETA: {{ eta }}) [{{ downloaded_size }}/{{ total_size }}]."
+    ],
+    "bridges.tools.download_completed": [
+      "Download completed: {{ file_name }}.",
+      "{{ file_name }} download completed."
+    ],
     "bridges.tools.download_url_failed": [
       "Download failed with error: {{ error }}.",
       "Could not download from URL: {{ error }}.",
@@ -210,12 +234,18 @@
       "Launching {{ binary_name }} with: {{ command }}...",
       "Executing command: {{ command }}..."
     ],
+    "bridges.tools.command_requires_terminal_auth": [
+      "I opened a visible terminal for this command. If it asks for your password or confirmation, enter it there. I'll continue once it finishes."
+    ],
     "bridges.tools.command_completed": [
       "Command completed successfully in {{ execution_time }}.",
       "{{ command }} finished in {{ execution_time }}.",
       "Command execution completed ({{ execution_time }}).",
       "Successfully executed command in {{ execution_time }}.",
       "Command finished successfully after {{ execution_time }}."
+    ],
+    "bridges.tools.command_output": [
+      "Output from {{ command }}:\n```\n{{ output }}\n```"
     ],
     "bridges.tools.command_failed": [
       "Command failed: {{ command }} ({{ error }}).",
@@ -295,6 +325,27 @@
       "Could not download {{ file_name }} for {{ resource_name }}: {{ error }}.",
       "{{ file_name }} download failed for {{ resource_name }}: {{ error }}.",
       "Error downloading {{ file_name }} from {{ url }} : {{ error }}."
+    ],
+    "react.tool_call.waiting": [
+      "Still working on this step. Please wait because {{ reason }}."
+    ],
+    "react.tool_call.reason.large_prompt": [
+      "the prompt is large (around {{ estimated_tokens }} tokens) and needs more inference time"
+    ],
+    "react.tool_call.reason.multi_tools": [
+      "the model is evaluating {{ tool_count }} tool schemas before deciding"
+    ],
+    "react.tool_call.reason.provider_latency": [
+      "the provider is taking longer than usual to complete this tool-selection call"
+    ],
+    "react.tool_call.diagnosis": [
+      "Still running this step. Quick diagnosis while it continues: provider={{ provider }}, tool choice={{ tool_choice }}, tools={{ tool_count }}, estimated tokens={{ total_tokens }} (prompt={{ prompt_tokens }}, tools={{ tool_tokens }}, history={{ history_tokens }}). Slowdowns usually come from provider queueing or large context."
+    ],
+    "react.tool.preparing": [
+      "Preparing the {{ tool_name }} tool..."
+    ],
+    "react.tool.ready": [
+      "{{ tool_name }} is ready to be used."
     ],
     "bridges.tools.resource_downloaded": [
       "{{ resource_name }} resource downloaded successfully to {{ resource_path }}.",

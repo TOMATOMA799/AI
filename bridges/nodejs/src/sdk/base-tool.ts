@@ -1,11 +1,22 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn, execSync } from 'node:child_process'
+import os from 'node:os'
+import { spawn, execSync, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
-import { downloadFile } from 'ipull'
+import {
+  NetworkHelper,
+  type DownloadFileProgress
+} from '@/helpers/network-helper'
 
-import { TOOLKITS_PATH } from '@bridge/constants'
+import {
+  LEON_TOOLKITS_PATH,
+  NVIDIA_LIBS_PATH,
+  PROFILE_TOOLS_PATH,
+  PYTORCH_TORCH_PATH
+} from '@bridge/constants'
 import { ToolkitConfig } from '@sdk/toolkit-config'
+import { reportToolOutput } from '@sdk/tool-reporter'
 import {
   isWindows,
   isMacOS,
@@ -16,7 +27,9 @@ import {
   formatFilePath,
   extractArchive
 } from '@sdk/utils'
-import { leon } from '@sdk/leon'
+
+const COMMAND_OUTPUT_PROGRESS_INTERVAL_MS = 2_000
+const COMMAND_OUTPUT_MAX_CHARS = 4_000
 
 // Progress callback type for reporting tool progress
 export type ProgressCallback = (progress: {
@@ -36,6 +49,8 @@ export interface ExecuteCommandOptions {
     timeout?: number
     encoding?: BufferEncoding
     sync?: boolean
+    openInTerminal?: boolean
+    waitForExit?: boolean
   }
   onProgress?: ProgressCallback
   onOutput?: (data: string, isError?: boolean) => void
@@ -43,6 +58,43 @@ export interface ExecuteCommandOptions {
 }
 
 export abstract class Tool {
+  private static isToolRuntime: boolean = ((): boolean => {
+    const args = process.argv
+    const runtimeIndex = args.indexOf('--runtime')
+    if (runtimeIndex === -1) {
+      return false
+    }
+    return args[runtimeIndex + 1] === 'tool'
+  })()
+
+  private static readonly nvidiaLibraryFolders = [
+    'cublas',
+    'cudnn',
+    'cuda_cudart',
+    'cuda_cupti',
+    'cusparse',
+    'cusparselt',
+    'cusparse_full',
+    'nccl',
+    'nvshmem',
+    'nvjitlink'
+  ]
+
+  /**
+   * Tool settings loaded from toolkit settings.json
+   */
+  protected settings: Record<string, unknown> = {}
+  /**
+   * Required settings keys for this tool
+   */
+  protected requiredSettings: string[] = []
+  /**
+   * Missing required settings details
+   */
+  protected missingSettings: {
+    missing: string[]
+    settingsPath: string
+  } | null = null
   /**
    * Tool name
    */
@@ -59,9 +111,74 @@ export abstract class Tool {
   abstract get description(): string
 
   /**
+   * Tool alias name (human readable)
+   */
+  get aliasToolName(): string {
+    try {
+      const config = ToolkitConfig.load(this.toolkit, this.toolName)
+      return (config.name as string) || this.toolName
+    } catch {
+      return this.toolName
+    }
+  }
+
+  /**
    * Enable CLI progress display for downloads (logs to stdout instead of stderr to avoid JSON interference)
    */
   protected cliProgress: boolean = true
+
+  /**
+   * Get the settings.json path for this tool
+   */
+  protected getSettingsPath(toolName?: string): string {
+    const resolvedToolName = toolName || this.toolName
+
+    return path.join(
+      PROFILE_TOOLS_PATH,
+      this.toolkit,
+      resolvedToolName,
+      'settings.json'
+    )
+  }
+
+  /**
+   * Check required settings and store missing ones
+   */
+  protected checkRequiredSettings(toolName?: string): void {
+    if (this.requiredSettings.length === 0) {
+      this.missingSettings = null
+      return
+    }
+
+    const missing = this.requiredSettings.filter((key) => {
+      const value = this.settings[key]
+      if (value === undefined || value === null) return true
+      if (typeof value === 'string' && value.trim() === '') return true
+      return false
+    })
+
+    this.missingSettings =
+      missing.length > 0
+        ? {
+            missing,
+            settingsPath: this.getSettingsPath(toolName)
+          }
+        : null
+  }
+
+  /**
+   * Get missing required settings information
+   */
+  getMissingSettings(): { missing: string[], settingsPath: string } | null {
+    return this.missingSettings
+  }
+
+  /**
+   * Resolve module directory from module URL
+   */
+  protected getToolDir(moduleUrl: string): string {
+    return path.dirname(fileURLToPath(moduleUrl))
+  }
 
   /**
    * Report tool status or information using leon.answer with automatic toolkit/tool context
@@ -81,27 +198,25 @@ export abstract class Tool {
       coreData['toolGroupId'] = toolGroupId
     }
 
-    await leon.answer({
-      key,
-      data: data || {},
-      core: coreData
-    })
+    try {
+      await reportToolOutput({
+        key,
+        data: data || {},
+        core: coreData
+      })
+    } catch (error) {
+      console.warn(
+        `[LEON_TOOL_LOG] Failed to report tool output: ${
+          (error as Error).message
+        }`
+      )
+    }
   }
 
   /**
-   * Escape shell argument by escaping special characters with backslashes
-   * This follows the Unix/Linux shell escaping convention
+   * Escape a shell argument.
    */
   private escapeShellArg(arg: string): string {
-    // Don't escape URLs - they have their own structure
-    try {
-      new URL(arg)
-      // If URL constructor succeeds, it's a valid URL - don't escape it
-      return arg
-    } catch {
-      // Not a valid URL, continue with normal escaping
-    }
-
     if (isWindows()) {
       // Windows: wrap in double quotes and escape internal quotes
       if (
@@ -116,8 +231,7 @@ export abstract class Tool {
       return arg
     }
 
-    // Unix/Linux: escape special characters with backslashes
-    return arg.replace(/(["\s'$`\\(){}[\]|&;<>*?!])/g, '\\$1')
+    return `'${arg.replace(/'/g, `'\\''`)}'`
   }
 
   /**
@@ -154,6 +268,16 @@ export abstract class Tool {
       toolGroupId
     )
 
+    if (execOptions.openInTerminal) {
+      return this.executeTerminalCommand(
+        binaryPath,
+        args,
+        commandString,
+        execOptions,
+        toolGroupId
+      )
+    }
+
     if (sync) {
       return this.executeSyncCommand(
         binaryPath,
@@ -187,6 +311,7 @@ export abstract class Tool {
   ): string {
     try {
       const startTime = Date.now()
+      const env = this.getBundledLibraryEnv()
 
       const result = execSync(
         `"${binaryPath}" ${args
@@ -195,7 +320,8 @@ export abstract class Tool {
         {
           encoding: execOptions.encoding || 'utf8',
           timeout: execOptions.timeout,
-          cwd: execOptions.cwd
+          cwd: execOptions.cwd,
+          env
         }
       )
 
@@ -210,8 +336,20 @@ export abstract class Tool {
         toolGroupId
       )
 
+      void this.reportCommandOutput(
+        result as string,
+        commandString,
+        toolGroupId
+      )
+
       return result as string
     } catch (error: unknown) {
+      const stdout = (error as { stdout?: Buffer | string }).stdout
+      const stderr = (error as { stderr?: Buffer | string }).stderr
+      const output = [stdout, stderr]
+        .map((chunk) => (chunk ? chunk.toString() : ''))
+        .join('')
+      void this.reportCommandOutput(output, commandString, toolGroupId)
       this.report(
         'bridges.tools.command_failed',
         {
@@ -239,15 +377,59 @@ export abstract class Tool {
     return new Promise((resolve, reject) => {
       const startTime = Date.now()
       let outputBuffer = ''
+      let pendingOutput = ''
+      let outputFlushTimer: NodeJS.Timeout | null = null
+      let timeoutHandle: NodeJS.Timeout | null = null
+      const env = this.getBundledLibraryEnv()
+      const flushOutputDelta = async (): Promise<void> => {
+        if (!pendingOutput) {
+          return
+        }
+
+        const output = pendingOutput
+        pendingOutput = ''
+        await this.reportCommandOutputDelta(output, commandString, toolGroupId)
+      }
+      const scheduleOutputDelta = (output: string): void => {
+        pendingOutput += output
+
+        if (outputFlushTimer) {
+          return
+        }
+
+        outputFlushTimer = setTimeout(() => {
+          outputFlushTimer = null
+          void flushOutputDelta()
+        }, COMMAND_OUTPUT_PROGRESS_INTERVAL_MS)
+      }
+      const clearOutputFlushTimer = (): void => {
+        if (!outputFlushTimer) {
+          return
+        }
+
+        clearTimeout(outputFlushTimer)
+        outputFlushTimer = null
+      }
+      const clearCommandTimeout = (): void => {
+        if (!timeoutHandle) {
+          return
+        }
+
+        clearTimeout(timeoutHandle)
+        timeoutHandle = null
+      }
 
       const childProcess = spawn(binaryPath, args, {
-        cwd: execOptions.cwd
+        cwd: execOptions.cwd,
+        env,
+        windowsHide: true
       })
 
       // Handle stdout
       childProcess.stdout.on('data', (data) => {
         const output = data.toString()
         outputBuffer += output
+        scheduleOutputDelta(output)
 
         if (onOutput) {
           onOutput(output, false)
@@ -263,6 +445,7 @@ export abstract class Tool {
       childProcess.stderr.on('data', (data) => {
         const output = data.toString()
         outputBuffer += output
+        scheduleOutputDelta(output)
 
         if (onOutput) {
           onOutput(output, true)
@@ -272,6 +455,9 @@ export abstract class Tool {
       // Handle process completion
       childProcess.on('close', async (code) => {
         const executionTime = Date.now() - startTime
+        clearCommandTimeout()
+        clearOutputFlushTimer()
+        await flushOutputDelta()
 
         if (code === 0) {
           await this.report(
@@ -280,6 +466,12 @@ export abstract class Tool {
               command: commandString,
               execution_time: `${executionTime}ms`
             },
+            toolGroupId
+          )
+
+          await this.reportCommandOutput(
+            outputBuffer,
+            commandString,
             toolGroupId
           )
 
@@ -298,14 +490,30 @@ export abstract class Tool {
             },
             toolGroupId
           )
-          reject(
-            new Error(`Command failed with exit code ${code}: ${outputBuffer}`)
+          await this.reportCommandOutput(
+            outputBuffer,
+            commandString,
+            toolGroupId
           )
+          const commandError = new Error(
+            `Command failed with exit code ${code}: ${outputBuffer}`
+          ) as Error & {
+            stdout?: string
+            stderr?: string
+            status?: number | null
+          }
+          commandError.stdout = outputBuffer
+          commandError.stderr = ''
+          commandError.status = code
+          reject(commandError)
         }
       })
 
       // Handle process errors
       childProcess.on('error', async (error) => {
+        clearCommandTimeout()
+        clearOutputFlushTimer()
+        await flushOutputDelta()
         await this.report(
           'bridges.tools.command_error',
           {
@@ -319,7 +527,10 @@ export abstract class Tool {
 
       // Handle timeout
       if (execOptions.timeout) {
-        setTimeout(() => {
+        timeoutHandle = setTimeout(() => {
+          timeoutHandle = null
+          clearOutputFlushTimer()
+          void flushOutputDelta()
           childProcess.kill('SIGTERM')
           this.report(
             'bridges.tools.command_timeout',
@@ -333,6 +544,39 @@ export abstract class Tool {
         }, execOptions.timeout)
       }
     })
+  }
+
+  private getBundledLibraryEnv(): NodeJS.ProcessEnv {
+    const env = { ...process.env }
+    const sharedLibraryPaths = this.getBundledLibraryPaths()
+
+    if (sharedLibraryPaths.length === 0) {
+      return env
+    }
+
+    const envKey =
+      process.platform === 'win32'
+        ? 'PATH'
+        : process.platform === 'darwin'
+          ? 'DYLD_LIBRARY_PATH'
+          : 'LD_LIBRARY_PATH'
+    const existingValue = env[envKey]
+
+    env[envKey] = [...sharedLibraryPaths, existingValue]
+      .filter(Boolean)
+      .join(path.delimiter)
+
+    return env
+  }
+
+  private getBundledLibraryPaths(): string[] {
+    const bundledPaths = [path.join(PYTORCH_TORCH_PATH, 'torch', 'lib')]
+
+    for (const folderName of Tool.nvidiaLibraryFolders) {
+      bundledPaths.push(path.join(NVIDIA_LIBS_PATH, folderName, 'lib'))
+    }
+
+    return bundledPaths.filter((candidate) => fs.existsSync(candidate))
   }
 
   /**
@@ -381,7 +625,7 @@ export abstract class Tool {
         ? `${actualFilename}.exe`
         : actualFilename
 
-    const binsPath = path.join(TOOLKITS_PATH, this.toolkit, 'bins')
+    const binsPath = path.join(LEON_TOOLKITS_PATH, this.toolkit, 'assets')
 
     // Ensure toolkit bins directory exists
     if (!fs.existsSync(binsPath)) {
@@ -416,9 +660,69 @@ export abstract class Tool {
     return binaryPath
   }
 
+  private formatCommandOutput(
+    output: string,
+    options: { preserveWhitespace?: boolean } = {}
+  ): string | null {
+    const trimmed = output.trim()
+    if (!trimmed) {
+      return null
+    }
+
+    const value = options.preserveWhitespace ? output : trimmed
+    const maxLength = COMMAND_OUTPUT_MAX_CHARS
+    if (value.length <= maxLength) {
+      return value
+    }
+
+    return `${value.slice(0, maxLength)}\n... (truncated)`
+  }
+
+  private async reportCommandOutput(
+    output: string,
+    command: string,
+    toolGroupId: string
+  ): Promise<void> {
+    const formatted = this.formatCommandOutput(output)
+    if (!formatted) {
+      return
+    }
+
+    await this.report(
+      'bridges.tools.command_output',
+      {
+        command,
+        output: formatted
+      },
+      toolGroupId
+    )
+  }
+
+  private async reportCommandOutputDelta(
+    output: string,
+    command: string,
+    toolGroupId: string
+  ): Promise<void> {
+    const formatted = this.formatCommandOutput(output, {
+      preserveWhitespace: true
+    })
+    if (!formatted) {
+      return
+    }
+
+    await this.report(
+      'bridges.tools.command_output_delta',
+      {
+        command,
+        output: formatted
+      },
+      toolGroupId
+    )
+  }
+
   /**
    * Get resource path and ensure all resource files are downloaded
-   * @param resourceName The name of the resource as defined in toolkit.json
+   * @param resourceName The name of the resource as defined in the tool manifest
    * @returns A promise that resolves to the path of the resource directory
    */
   async getResourcePath(resourceName: string): Promise<string> {
@@ -443,9 +747,7 @@ export abstract class Tool {
     }
 
     const resourcePath = path.join(
-      TOOLKITS_PATH,
-      this.toolkit,
-      'bins',
+      path.join(LEON_TOOLKITS_PATH, this.toolkit, 'assets'),
       resourceName
     )
 
@@ -477,16 +779,14 @@ export abstract class Tool {
     for (const resourceUrl of resourceUrls) {
       const adjustedUrl = await setHuggingFaceURL(resourceUrl)
 
-      // Extract filename from URL
-      const urlPath = new URL(adjustedUrl).pathname
-      const fileName = path.basename(urlPath).split('?')[0] // Remove query parameters
+      const relativePath = this.getResourceRelativePath(adjustedUrl)
 
-      // Ensure fileName is not empty
-      if (!fileName) {
+      if (!relativePath) {
         throw new Error(`Invalid filename extracted from URL: ${adjustedUrl}`)
       }
 
-      const filePath = path.join(resourcePath, fileName)
+      const fileName = path.basename(relativePath)
+      const filePath = path.join(resourcePath, relativePath)
 
       await this.report('bridges.tools.downloading_resource_file', {
         resource_name: resourceName,
@@ -495,17 +795,13 @@ export abstract class Tool {
       })
 
       try {
-        const engine = await downloadFile({
-          url: adjustedUrl,
-          savePath: filePath,
+        await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
+        await NetworkHelper.downloadFile(adjustedUrl, filePath, {
           cliProgress: false,
           parallelStreams: 3,
-          skipExisting: false
+          skipExisting: false,
+          onProgress: this.createDownloadProgressListener(fileName)
         })
-
-        this.listenDownloadProgress(engine, fileName)
-
-        await engine.download()
 
         await this.report('bridges.tools.resource_file_downloaded', {
           resource_name: resourceName,
@@ -546,21 +842,45 @@ export abstract class Tool {
     resourceUrls: string[]
   ): boolean {
     for (const resourceUrl of resourceUrls) {
-      const urlPath = new URL(resourceUrl).pathname
-      const fileName = path.basename(urlPath).split('?')[0] // Remove query parameters
+      const relativePath = this.getResourceRelativePath(resourceUrl)
 
-      // Skip if fileName is empty
-      if (!fileName) {
+      if (!relativePath) {
         return false
       }
 
-      const filePath = path.join(resourcePath, fileName)
+      const filePath = path.join(resourcePath, relativePath)
 
       if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
         return false
       }
     }
     return true
+  }
+
+  /**
+   * Resolve a resource URL to a relative file path inside the resource directory.
+   * Preserves subfolders (e.g., speech_tokenizer/config.json) when present.
+   */
+  private getResourceRelativePath(resourceUrl: string): string {
+    const urlPath = new URL(resourceUrl).pathname
+    const markers = ['/resolve/', '/raw/']
+
+    for (const marker of markers) {
+      const markerIndex = urlPath.indexOf(marker)
+      if (markerIndex === -1) {
+        continue
+      }
+
+      const afterMarker = urlPath.slice(markerIndex + marker.length)
+      const parts = afterMarker.split('/').filter(Boolean)
+
+      if (parts.length > 1) {
+        const relativePath = parts.slice(1).join('/')
+        return path.posix.normalize(relativePath).replace(/^\/+/, '')
+      }
+    }
+
+    return path.basename(urlPath)
   }
 
   /**
@@ -630,6 +950,193 @@ export abstract class Tool {
   }
 
   /**
+   * Execute command in a new terminal window
+   */
+  private async executeTerminalCommand(
+    binaryPath: string,
+    args: string[],
+    commandString: string,
+    execOptions: ExecuteCommandOptions['options'] = {},
+    toolGroupId: string
+  ): Promise<string> {
+    const cwd = execOptions.cwd || process.cwd()
+    const timeout = execOptions.timeout ?? 600_000
+    const waitForExit = execOptions.waitForExit ?? true
+    const startTime = Date.now()
+    const markerFile = path.join(
+      os.tmpdir(),
+      `${this.toolkit}_${this.toolName}_${Date.now()}.done`
+    )
+
+    const runCommand = this.buildTerminalRunCommand(
+      binaryPath,
+      args,
+      cwd,
+      markerFile
+    )
+
+    this.launchTerminal(runCommand)
+
+    if (!waitForExit) {
+      return ''
+    }
+
+    const exitCode = await this.waitForMarker(markerFile, timeout)
+    const executionTime = `${Date.now() - startTime}ms`
+
+    if (exitCode === null) {
+      await this.report(
+        'bridges.tools.command_timeout',
+        {
+          command: commandString,
+          timeout: `${timeout}ms`
+        },
+        toolGroupId
+      )
+      throw new Error(`Command timed out after ${timeout}ms`)
+    }
+
+    if (exitCode !== 0) {
+      await this.report(
+        'bridges.tools.command_failed',
+        {
+          command: commandString,
+          exit_code: exitCode.toString(),
+          execution_time: executionTime
+        },
+        toolGroupId
+      )
+      throw new Error(`Command failed with exit code ${exitCode}`)
+    }
+
+    await this.report(
+      'bridges.tools.command_completed',
+      {
+        command: commandString,
+        execution_time: executionTime
+      },
+      toolGroupId
+    )
+
+    return ''
+  }
+
+  private buildTerminalRunCommand(
+    binaryPath: string,
+    args: string[],
+    cwd: string,
+    markerFile: string
+  ): string {
+    if (isWindows()) {
+      const cwdArg = this.escapeWindowsArg(cwd)
+      const markerArg = this.escapeWindowsArg(markerFile)
+      const command = this.buildBinaryCommand(binaryPath, args)
+      return `cd /d ${cwdArg} && ${command} & echo %ERRORLEVEL% > ${markerArg}`
+    }
+
+    const cwdArg = this.escapeShellArg(cwd)
+    const markerArg = this.escapeShellArg(markerFile)
+    const command = this.buildBinaryCommand(binaryPath, args)
+    return `cd ${cwdArg} && ${command}; echo $? > ${markerArg}`
+  }
+
+  private buildBinaryCommand(binaryPath: string, args: string[]): string {
+    const binaryArg = this.escapeShellArg(binaryPath)
+    const argString = args.map((arg) => this.escapeShellArg(arg)).join(' ')
+    return `${binaryArg} ${argString}`.trim()
+  }
+
+  private launchTerminal(command: string): void {
+    if (isMacOS()) {
+      const termProgram = process.env['TERM_PROGRAM'] || ''
+      const escaped = this.escapeForAppleScript(command)
+      if (termProgram.toLowerCase().includes('iterm')) {
+        const script = [
+          'tell application "iTerm"',
+          '  create window with default profile',
+          `  tell current session of current window to write text "${escaped}"`,
+          'end tell'
+        ].join('\n')
+        this.spawnDetached('osascript', ['-e', script])
+        return
+      }
+
+      const script = `tell application "Terminal" to do script "${escaped}"`
+      this.spawnDetached('osascript', ['-e', script])
+      return
+    }
+
+    if (isWindows()) {
+      if (process.env['WT_SESSION'] || this.commandExists('wt')) {
+        this.spawnDetached('wt', ['cmd', '/k', command])
+        return
+      }
+      this.spawnDetached('cmd', ['/c', 'start', '', 'cmd', '/k', command])
+      return
+    }
+
+    const linuxCommand = `${command}; echo Command finished.; exec bash`
+    const candidates: Array<{ cmd: string, args: string[] }> = [
+      { cmd: 'gnome-terminal', args: ['--', 'bash', '-lc', linuxCommand] },
+      { cmd: 'x-terminal-emulator', args: ['-e', 'bash', '-lc', linuxCommand] },
+      { cmd: 'konsole', args: ['-e', 'bash', '-lc', linuxCommand] },
+      {
+        cmd: 'xfce4-terminal',
+        args: ['--command', `bash -lc "${linuxCommand}"`]
+      },
+      { cmd: 'xterm', args: ['-e', 'bash', '-lc', linuxCommand] },
+      { cmd: 'kitty', args: ['bash', '-lc', linuxCommand] }
+    ]
+
+    for (const candidate of candidates) {
+      if (!this.commandExists(candidate.cmd)) continue
+      this.spawnDetached(candidate.cmd, candidate.args)
+      return
+    }
+
+    throw new Error('No supported terminal emulator found to launch command.')
+  }
+
+  private async waitForMarker(
+    markerFile: string,
+    timeoutMs: number
+  ): Promise<number | null> {
+    const start = Date.now()
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(markerFile)) {
+        const content = await fs.promises.readFile(markerFile, 'utf-8')
+        const exitCode = Number.parseInt(content.trim(), 10)
+        return Number.isFinite(exitCode) ? exitCode : 1
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    return null
+  }
+
+  private spawnDetached(command: string, args: string[]): void {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    child.unref()
+  }
+
+  private commandExists(command: string): boolean {
+    const checker = isWindows() ? 'where' : 'which'
+    const result = spawnSync(checker, [command], { stdio: 'ignore' })
+    return result.status === 0
+  }
+
+  private escapeWindowsArg(value: string): string {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+
+  private escapeForAppleScript(value: string): string {
+    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  }
+
+  /**
    * Download binary on-demand if not found
    */
   private async downloadBinaryOnDemand(
@@ -638,7 +1145,7 @@ export abstract class Tool {
     executable: string
   ): Promise<void> {
     try {
-      const binsPath = path.join(TOOLKITS_PATH, this.toolkit, 'bins')
+      const binsPath = path.join(LEON_TOOLKITS_PATH, this.toolkit, 'assets')
       const binaryPath = path.join(binsPath, executable)
 
       await this.report('bridges.tools.binary_not_found', {
@@ -694,7 +1201,7 @@ export abstract class Tool {
   }
 
   /**
-   * Download binary from URL using ipull (faster parallel downloader)
+   * Download binary from URL using the core download helper.
    * If the downloaded file is an archive, it will be extracted automatically
    */
   private async downloadBinary(url: string, outputPath: string): Promise<void> {
@@ -720,19 +1227,14 @@ export abstract class Tool {
         downloadPath = outputPath + archiveExt
       }
 
-      // Download the file directly to the download path using ipull
-      const engine = await downloadFile({
-        url: url,
-        savePath: downloadPath,
+      await NetworkHelper.downloadFile(url, downloadPath, {
         cliProgress: false,
         parallelStreams: 3,
-        skipExisting: false
+        skipExisting: false,
+        onProgress: this.createDownloadProgressListener(
+          path.basename(downloadPath)
+        )
       })
-
-      this.listenDownloadProgress(engine, path.basename(downloadPath))
-
-      // Actually start the download
-      await engine.download()
 
       // If it's an archive, extract it
       if (isArchiveDownload) {
@@ -793,7 +1295,8 @@ export abstract class Tool {
         fs.rmSync(tempExtractPath, { recursive: true, force: true })
 
         await this.report('bridges.tools.archive_extracted', {
-          binary_name: path.basename(outputPath)
+          binary_name: path.basename(outputPath),
+          binary_path: outputPath
         })
       }
     } catch (error) {
@@ -813,91 +1316,92 @@ export abstract class Tool {
     const logMessage = `[LEON_TOOL_LOG] ${message}${
       args.length > 0 ? ' ' + args.join(' ') : ''
     }`
-    process.stdout.write(logMessage + '\n')
+    if (Tool.isToolRuntime) {
+      process.stderr.write(logMessage + '\n')
+    } else {
+      process.stdout.write(logMessage + '\n')
+    }
   }
 
   /**
-   * Setup progress tracking for a download engine if cliProgress is enabled
-   * @param engine The download engine from ipull
+   * Create a throttled progress listener for a download.
    * @param fileName The name of the file being downloaded
    */
-  private listenDownloadProgress(
-    engine: {
-      on: (event: string, callback: (progress: unknown) => void) => void
-    },
+  private createDownloadProgressListener(
     fileName: string
-  ): void {
-    if (this.cliProgress) {
-      let lastLoggedPercentage = -1
-      let lastLogTime = 0
-      const LOG_INTERVAL_MS = 2_000 // Log every 2 seconds at most
-      const PERCENTAGE_THRESHOLD = 5 // Log every 5% progress
+  ): (progress: DownloadFileProgress) => void {
+    if (!this.cliProgress) {
+      return (): void => {}
+    }
 
-      engine.on('progress', (progress: unknown) => {
-        if (progress && typeof progress === 'object' && progress !== null) {
-          const progressObj = progress as {
-            percentage?: number
-            speed?: string | number
-            eta?: string | number
-            size?: string | number
-            transferred?: string | number
-          }
+    let lastLoggedPercentage = -1
+    let lastLogTime = 0
+    const LOG_INTERVAL_MS = 2_000 // Log every 2 seconds at most
+    const PERCENTAGE_THRESHOLD = 5 // Log every 5% progress
 
-          const percentage = Math.round(progressObj.percentage || 0)
-          const currentTime = Date.now()
+    return (progress: DownloadFileProgress): void => {
+      const percentage = Math.round(progress.percentage ?? 0)
+      const currentTime = Date.now()
 
-          // Only log if we've made significant progress or enough time has passed
-          const shouldLog =
-            percentage >= lastLoggedPercentage + PERCENTAGE_THRESHOLD ||
-            currentTime - lastLogTime >= LOG_INTERVAL_MS ||
-            percentage === 100
+      // Only log if we've made significant progress or enough time has passed
+      const shouldLog =
+        percentage >= lastLoggedPercentage + PERCENTAGE_THRESHOLD ||
+        currentTime - lastLogTime >= LOG_INTERVAL_MS ||
+        percentage === 100
 
-          if (shouldLog) {
-            const speed = progressObj.speed
-              ? formatSpeed(progressObj.speed)
-              : ''
-            const eta = progressObj.eta ? formatETA(progressObj.eta) : ''
-
-            // Build progress line
-            let progressLine = `Downloading ${fileName}: ${percentage}%`
-
-            if (speed) {
-              progressLine += ` at ${speed}`
-            }
-
-            if (eta && eta !== '∞') {
-              progressLine += ` (ETA: ${eta})`
-            }
-
-            if (progressObj.size && progressObj.transferred) {
-              const totalSize = formatBytes(
-                typeof progressObj.size === 'string'
-                  ? parseFloat(progressObj.size)
-                  : progressObj.size
-              )
-              const transferredSize = formatBytes(
-                typeof progressObj.transferred === 'string'
-                  ? parseFloat(progressObj.transferred)
-                  : progressObj.transferred
-              )
-              progressLine += ` [${transferredSize}/${totalSize}]`
-            }
-
-            this.log(progressLine)
-
-            lastLoggedPercentage = percentage
-            lastLogTime = currentTime
-          }
-        }
-      })
-
-      // Log completion
-      const logCompletion = (): void => {
-        this.log(`Download completed: ${fileName}`)
+      if (!shouldLog) {
+        return
       }
 
-      engine.on('finished', logCompletion)
-      engine.on('end', logCompletion)
+      const speed =
+        progress.bytesPerSecond > 0
+          ? formatSpeed(progress.bytesPerSecond)
+          : ''
+      const eta =
+        progress.etaMs !== null ? formatETA(progress.etaMs / 1_000) : ''
+
+      const progressData: Record<string, string | number> = {
+        file_name: fileName,
+        percentage: percentage,
+        speed: '',
+        eta: '',
+        downloaded_size: '',
+        total_size: ''
+      }
+      if (speed) {
+        progressData['speed'] = speed
+      }
+      if (eta && eta !== '∞') {
+        progressData['eta'] = eta
+      }
+      if (
+        progress.totalBytes !== null &&
+        progress.downloadedBytes <= progress.totalBytes
+      ) {
+        progressData['downloaded_size'] = formatBytes(progress.downloadedBytes)
+        progressData['total_size'] = formatBytes(progress.totalBytes)
+      }
+
+      const progressKey =
+        progressData['speed'] &&
+        progressData['eta'] &&
+        progressData['downloaded_size'] &&
+        progressData['total_size']
+          ? 'bridges.tools.download_progress_with_details'
+          : 'bridges.tools.download_progress'
+      void this.report(progressKey, progressData)
+
+      if (
+        progress.totalBytes !== null &&
+        progress.downloadedBytes === progress.totalBytes
+      ) {
+        void this.report('bridges.tools.download_completed', {
+          file_name: fileName
+        })
+      }
+
+      lastLoggedPercentage = percentage
+      lastLogTime = currentTime
     }
   }
 

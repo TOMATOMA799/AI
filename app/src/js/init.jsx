@@ -9,10 +9,14 @@ import {
   ListHeader,
   ListItem,
   Loader
-} from '@leon-ai/aurora'
+} from '@aurora'
 
 const container = document.querySelector('#init')
 const root = createRoot(container)
+const LLAMA_SERVER_BOOT_STATUS = 'llamaServerBoot'
+const INIT_ERROR_STATUS = 'error'
+const INIT_ERROR_DISMISS_SECONDS = 10
+const INIT_ERROR_DISMISS_INTERVAL_MS = 1_000
 
 function Item({ children, status }) {
   if (status === 'error') {
@@ -96,12 +100,24 @@ function SuccessListItem({ children }) {
 function Init() {
   const parentRef = useRef(null)
   const [config, setConfig] = useState(() => ({ ...window.leonConfigInfo }))
+  const usesLlamaCPP =
+    config.llm?.workflowProvider === 'llamacpp' ||
+    config.llm?.agentProvider === 'llamacpp'
+  const [initErrorCountdown, setInitErrorCountdown] = useState(null)
+  const [areInitErrorsDismissed, setAreInitErrorsDismissed] = useState(false)
   const [statusMap, setStatusMap] = useState({
     clientCoreServerHandshake: 'loading',
-    tcpServerBoot: 'loading',
-    llm: 'loading',
-    llmDutiesWarmUp: 'loading'
+    tcpServerBoot:
+      window.leonConfigInfo?.tcpServer?.enabled === false ? 'success' : 'loading',
+    [LLAMA_SERVER_BOOT_STATUS]:
+      window.leonConfigInfo?.llm?.workflowProvider === 'llamacpp' ||
+      window.leonConfigInfo?.llm?.agentProvider === 'llamacpp'
+        ? 'loading'
+        : 'success'
   })
+  const hasInitError = Object.values(statusMap).some(
+    (status) => status === INIT_ERROR_STATUS
+  )
 
   useEffect(() => {
     setTimeout(() => {
@@ -112,6 +128,10 @@ function Init() {
 
     function handleStatusChange(event) {
       const { statusName, statusType } = event.detail
+
+      if (statusType === INIT_ERROR_STATUS) {
+        setAreInitErrorsDismissed(false)
+      }
 
       setStatusMap((prev) => ({ ...prev, [statusName]: statusType }))
     }
@@ -127,20 +147,52 @@ function Init() {
       )
   }, [])
 
+  useEffect(() => {
+    if (!hasInitError || areInitErrorsDismissed) {
+      setInitErrorCountdown(null)
+      return
+    }
+
+    let secondsLeft = INIT_ERROR_DISMISS_SECONDS
+    setInitErrorCountdown(secondsLeft)
+
+    const interval = setInterval(() => {
+      secondsLeft -= 1
+      setInitErrorCountdown(secondsLeft)
+
+      if (secondsLeft <= 0) {
+        clearInterval(interval)
+        setAreInitErrorsDismissed(true)
+      }
+    }, INIT_ERROR_DISMISS_INTERVAL_MS)
+
+    return () => clearInterval(interval)
+  }, [hasInitError, areInitErrorsDismissed])
+
   const statuses = []
   for (let key of Object.keys(statusMap)) {
-    // If LLM is not enabled, we don't need to check for LLM duties warm up
-    if (
-      key === 'llmDutiesWarmUp' &&
-      (!config.llm?.enabled || !config.shouldWarmUpLLMDuties)
+    if (key === 'tcpServerBoot' && config.tcpServer?.enabled === false) {
+      statuses.push('success')
+    } else if (statusMap[key] === INIT_ERROR_STATUS && areInitErrorsDismissed) {
+      statuses.push('success')
+    } else if (
+      key === LLAMA_SERVER_BOOT_STATUS &&
+      !usesLlamaCPP
     ) {
       statuses.push('success')
-    } else if (!config[key] || config[key].enabled) {
+    } else {
       statuses.push(statusMap[key])
     }
   }
 
   const areAllStatusesSuccess = statuses.every((status) => status === 'success')
+  const getInitMessage = (status, defaultMessage) => {
+    if (status === INIT_ERROR_STATUS && initErrorCountdown !== null) {
+      return `An error occurred during the initialization. This message will disappear in ${initErrorCountdown} seconds`
+    }
+
+    return defaultMessage
+  }
 
   useEffect(() => {
     if (window.leonConfigInfo) {
@@ -172,15 +224,22 @@ function Init() {
           <List>
             <ListHeader>Leon is getting ready...</ListHeader>
             <Item status={statusMap.clientCoreServerHandshake}>
-              Client and core server handshaked
+              {getInitMessage(
+                statusMap.clientCoreServerHandshake,
+                'Client and core server handshaked'
+              )}
             </Item>
-            <Item status={statusMap.tcpServerBoot}>TCP server booted</Item>
-            {config.llm && config.llm.enabled && (
-              <Item status={statusMap.llm}>LLM loaded</Item>
+            {config.tcpServer?.enabled !== false && (
+              <Item status={statusMap.tcpServerBoot}>
+                {getInitMessage(statusMap.tcpServerBoot, 'TCP server booted')}
+              </Item>
             )}
-            {config.shouldWarmUpLLMDuties && (
-              <Item status={statusMap.llmDutiesWarmUp}>
-                LLM duties warmed up
+            {usesLlamaCPP && (
+              <Item status={statusMap[LLAMA_SERVER_BOOT_STATUS]}>
+                {getInitMessage(
+                  statusMap[LLAMA_SERVER_BOOT_STATUS],
+                  'llama-server booted'
+                )}
               </Item>
             )}
           </List>

@@ -1,8 +1,23 @@
 import os from 'node:os'
+import { execFileSync } from 'node:child_process'
 
 import type { Llama } from 'node-llama-cpp'
 
 import { OSTypes, CPUArchitectures } from '@/types'
+
+const BYTES_PER_GIB = 1_024 * 1_024 * 1_024
+const MACOS_DEFAULT_VM_STAT_PAGE_SIZE_BYTES = 16_384
+const MACOS_VM_STAT_TIMEOUT_MS = 3_000
+const MACOS_VM_STAT_PAGE_SIZE_REGEX = /page size of (\d+) bytes/
+const MACOS_VM_STAT_PAGE_LINE_REGEX = /^Pages ([^:]+):\s+(\d+)\./
+const MACOS_RECLAIMABLE_VM_STAT_PAGE_NAMES = [
+  'free',
+  'inactive',
+  'speculative',
+  'purgeable'
+]
+const MINIMUM_LOCAL_LLM_VRAM_GB = 6
+const MINIMUM_LOCAL_LLM_RAM_GB = 8
 
 enum OSNames {
   Windows = 'Windows',
@@ -40,6 +55,50 @@ type PartialInformation = {
 }
 
 export class SystemHelper {
+  private static hardwareInspectionLlamaPromise: Promise<Llama | null> | null =
+    null
+
+  private static async getHardwareInspectionLlama(): Promise<Llama | null> {
+    if (!this.hardwareInspectionLlamaPromise) {
+      this.hardwareInspectionLlamaPromise = (async (): Promise<Llama | null> => {
+        try {
+          const { getLlama, LlamaLogLevel } = await Function(
+            'return import("node-llama-cpp")'
+          )()
+
+          return await getLlama({
+            logLevel: LlamaLogLevel.disabled
+          })
+        } catch {
+          return null
+        }
+      })()
+    }
+
+    return this.hardwareInspectionLlamaPromise
+  }
+
+  private static async resolveLlamaAPI(
+    llama?: Llama,
+    options: { allowCoreImport?: boolean } = {}
+  ): Promise<Llama | null> {
+    if (llama) {
+      return llama
+    }
+
+    if (options.allowCoreImport !== false) {
+      const coreLlama = (await import('@/core')).LLM_MANAGER.llama as
+        | Llama
+        | null
+
+      if (coreLlama) {
+        return coreLlama
+      }
+    }
+
+    return this.getHardwareInspectionLlama()
+  }
+
   /**
    * Get information about your OS
    * N.B. Node.js returns info based on the compiled binary we are running on. Not based our machine hardware
@@ -124,7 +183,7 @@ export class SystemHelper {
    * @example getTotalRAM() // 4
    */
   public static getTotalRAM(): number {
-    return Number((os.totalmem() / (1_024 * 1_024 * 1_024)).toFixed(2))
+    return Number((os.totalmem() / BYTES_PER_GIB).toFixed(2))
   }
 
   /**
@@ -132,7 +191,72 @@ export class SystemHelper {
    * @example getFreeRAM() // 6
    */
   public static getFreeRAM(): number {
-    return Number((os.freemem() / (1_024 * 1_024 * 1_024)).toFixed(2))
+    return Number((this.getFreeRAMInBytes() / BYTES_PER_GIB).toFixed(2))
+  }
+
+  /**
+   * Get the amount of free memory (in bytes) on the machine
+   * @example getFreeRAMInBytes() // 6442450944
+   */
+  public static getFreeRAMInBytes(): number {
+    if (this.isMacOS()) {
+      return this.getMacOSAvailableMemoryInBytes() || os.freemem()
+    }
+
+    return os.freemem()
+  }
+
+  /**
+   * Get macOS available memory from reclaimable vm_stat pages
+   * @example getMacOSAvailableMemoryInBytes() // 6442450944
+   */
+  private static getMacOSAvailableMemoryInBytes(): number | null {
+    try {
+      const output = execFileSync('vm_stat', {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: MACOS_VM_STAT_TIMEOUT_MS
+      })
+
+      return this.parseMacOSAvailableMemoryInBytes(output)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Parse macOS available memory from vm_stat output
+   * @example parseMacOSAvailableMemoryInBytes('Mach Virtual Memory Statistics: ...') // 6442450944
+   */
+  private static parseMacOSAvailableMemoryInBytes(
+    vmStatOutput: string
+  ): number | null {
+    const pageSizeMatch = vmStatOutput.match(MACOS_VM_STAT_PAGE_SIZE_REGEX)
+    const pageSize = pageSizeMatch?.[1]
+      ? Number(pageSizeMatch[1])
+      : MACOS_DEFAULT_VM_STAT_PAGE_SIZE_BYTES
+    const pageCounts = new Map<string, number>()
+
+    for (const line of vmStatOutput.split('\n')) {
+      const lineMatch = line.trim().match(MACOS_VM_STAT_PAGE_LINE_REGEX)
+
+      if (!lineMatch?.[1] || !lineMatch[2]) {
+        continue
+      }
+
+      pageCounts.set(lineMatch[1], Number(lineMatch[2]))
+    }
+
+    const reclaimablePages = MACOS_RECLAIMABLE_VM_STAT_PAGE_NAMES.reduce(
+      (totalPages, pageName) => totalPages + (pageCounts.get(pageName) || 0),
+      0
+    )
+
+    if (!Number.isFinite(pageSize) || reclaimablePages <= 0) {
+      return null
+    }
+
+    return reclaimablePages * pageSize
   }
 
   /**
@@ -198,8 +322,11 @@ export class SystemHelper {
    * Get the names of the GPU devices on the machine
    * @example getGPUDeviceNames() // ['Apple M1 Pro']
    */
-  public static async getGPUDeviceNames(llama?: Llama): Promise<string[]> {
-    const llamaAPI = llama ? llama : (await import('@/core')).LLM_MANAGER.llama
+  public static async getGPUDeviceNames(
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
+  ): Promise<string[]> {
+    const llamaAPI = await this.resolveLlamaAPI(llama, options)
 
     if (llamaAPI) {
       return llamaAPI.getGpuDeviceNames()
@@ -212,8 +339,11 @@ export class SystemHelper {
    * Check if the machine has a GPU
    * @example hasGPU() // true
    */
-  public static async hasGPU(llama?: Llama): Promise<boolean> {
-    const llamaAPI = llama ? llama : (await import('@/core')).LLM_MANAGER.llama
+  public static async hasGPU(
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
+  ): Promise<boolean> {
+    const llamaAPI = await this.resolveLlamaAPI(llama, options)
 
     if (llamaAPI) {
       return !!llamaAPI.gpu
@@ -227,9 +357,10 @@ export class SystemHelper {
    * @example getGraphicsComputeAPI() // 'cuda'
    */
   public static async getGraphicsComputeAPI(
-    llama?: Llama
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
   ): Promise<GraphicsComputeAPIs> {
-    const llamaAPI = llama ? llama : (await import('@/core')).LLM_MANAGER.llama
+    const llamaAPI = await this.resolveLlamaAPI(llama, options)
 
     if (llamaAPI && llamaAPI.gpu) {
       return llamaAPI.gpu as GraphicsComputeAPIs
@@ -242,8 +373,11 @@ export class SystemHelper {
    * Get the amount of used VRAM (in GB) on the machine
    * @example getUsedVRAM() // 6.04
    */
-  public static async getUsedVRAM(llama?: Llama): Promise<number> {
-    const llamaAPI = llama ? llama : (await import('@/core')).LLM_MANAGER.llama
+  public static async getUsedVRAM(
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
+  ): Promise<number> {
+    const llamaAPI = await this.resolveLlamaAPI(llama, options)
 
     if (llamaAPI) {
       const vramState = await llamaAPI.getVramState()
@@ -258,8 +392,11 @@ export class SystemHelper {
    * Get the total amount of VRAM (in GB) on the machine
    * @example getTotalVRAM() // 12
    */
-  public static async getTotalVRAM(llama?: Llama): Promise<number> {
-    const llamaAPI = llama ? llama : (await import('@/core')).LLM_MANAGER.llama
+  public static async getTotalVRAM(
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
+  ): Promise<number> {
+    const llamaAPI = await this.resolveLlamaAPI(llama, options)
 
     if (llamaAPI) {
       const vramState = await llamaAPI.getVramState()
@@ -271,11 +408,28 @@ export class SystemHelper {
   }
 
   /**
+   * Check if the machine can support a local LLM based on VRAM or system RAM
+   * @example canSupportLocalLLM() // true
+   */
+  public static async canSupportLocalLLM(
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
+  ): Promise<boolean> {
+    return (
+      (await this.getTotalVRAM(llama, options)) >= MINIMUM_LOCAL_LLM_VRAM_GB ||
+      this.getTotalRAM() >= MINIMUM_LOCAL_LLM_RAM_GB
+    )
+  }
+
+  /**
    * Get the amount of free VRAM (in GB) on the machine
    * @example getFreeVRAM() // 6
    */
-  public static async getFreeVRAM(llama?: Llama): Promise<number> {
-    const llamaAPI = llama ? llama : (await import('@/core')).LLM_MANAGER.llama
+  public static async getFreeVRAM(
+    llama?: Llama,
+    options?: { allowCoreImport?: boolean }
+  ): Promise<number> {
+    const llamaAPI = await this.resolveLlamaAPI(llama, options)
 
     if (llamaAPI) {
       const vramState = await llamaAPI.getVramState()

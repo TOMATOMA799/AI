@@ -3,12 +3,12 @@ import type {
   SkillLocaleConfigSchema,
   SkillSchema
 } from '@/schemas/skill-schemas'
-import { BRAIN, NLU, NER, MODEL_LOADER } from '@/core'
+import { BRAIN, NLU } from '@/core'
 import { SkillDomainHelper } from '@/helpers/skill-domain-helper'
 import { LogHelper } from '@/helpers/log-helper'
 import { SkillBridges } from '@/core/brain/types'
 
-const SKILL_CONFIG_PROPS_TO_KEEP = ['name', 'bridge', 'version', 'flow']
+const SKILL_CONFIG_PROPS_TO_KEEP = ['name', 'bridge', 'version', 'workflow']
 
 export const DEFAULT_NLU_PROCESS_RESULT: NLUProcessResult = {
   // Skill name without the "_skill" prefix
@@ -20,7 +20,7 @@ export const DEFAULT_NLU_PROCESS_RESULT: NLUProcessResult = {
     name: '',
     bridge: SkillBridges.Python,
     version: '',
-    flow: []
+    workflow: []
   },
   localeSkillConfig: {
     variables: {},
@@ -48,48 +48,25 @@ export class NLUProcessResultUpdater {
   ): Promise<void> {
     /**
      * Utterance update dependencies, update:
-     * The utterance, entities, sentiment(s)
+     * The utterance
      */
     if (newResult.new?.utterance && newResult.new.utterance !== '') {
       const newUtterance = newResult.new.utterance
-      const {
-        utterances: contextUtterances,
-        entities: contextEntities,
-        sentiments: contextSentiments
-      } = NLU.nluProcessResult.context
-
-      // Extract built-in entities from the utterance
-      const newEntities = await NER.extractBuiltInEntities(
-        BRAIN.lang,
-        newUtterance
-      )
-
-      // Get sentiment analysis
-      const { sentiment } =
-        await MODEL_LOADER.mainNLPContainer.getSentiment(newUtterance)
+      const { utterances: contextUtterances } = NLU.nluProcessResult.context
 
       NLU.nluProcessResult = {
         ...NLU.nluProcessResult,
         new: {
           utterance: newUtterance,
           actionArguments: {},
-          entities: newEntities,
-          sentiment: {
-            vote: sentiment.vote || 'neutral',
-            score: sentiment.score || 0
-          }
+          entities: [],
+          sentiment: {}
         },
         context: {
           ...NLU.nluProcessResult.context,
           utterances: [...contextUtterances, newUtterance],
-          entities: [...contextEntities, ...newEntities],
-          sentiments: [
-            ...contextSentiments,
-            {
-              vote: sentiment.vote || 'neutral',
-              score: sentiment.score || 0
-            }
-          ]
+          entities: [],
+          sentiments: []
         }
       }
 
@@ -167,8 +144,8 @@ export class NLUProcessResultUpdater {
               utterances: [NLU.nluProcessResult.new.utterance],
               // Action arguments aren't processed yet at this stage, hence empty
               actionArguments: [],
-              entities: NLU.nluProcessResult.new.entities,
-              sentiments: [NLU.nluProcessResult.new.sentiment],
+              entities: [],
+              sentiments: [],
               // Preserve context data when switching skills/contexts
               data: NLU.nluProcessResult.context.data
             },

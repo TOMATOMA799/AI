@@ -1,12 +1,13 @@
 import { platform, arch, cpus } from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 
 import axios from 'axios'
 
 const HUGGING_FACE_URL = 'https://huggingface.co'
 const HUGGING_FACE_MIRROR_URL = 'https://hf-mirror.com'
+const ZIP_ARCHIVE_EXTENSIONS = new Set(['.zip', '.whl'])
 
 /**
  * Formats a file path as a clickable path with proper delimiters
@@ -26,6 +27,35 @@ export function formatFilePath(filePath: string): string {
  */
 export function formatFilePaths(filePaths: string[]): string {
   return filePaths.map(formatFilePath).join(', ')
+}
+
+/**
+ * Normalize a language input to an ISO 639-1 code.
+ * Supports direct language codes and locale tags such as `fr-FR`.
+ */
+export function normalizeLanguageCode(value: string): string | null {
+  const trimmedValue = value.trim()
+
+  if (trimmedValue === '') {
+    return null
+  }
+
+  try {
+    const locale = new Intl.Locale(trimmedValue)
+
+    return locale.language ? locale.language.toLowerCase() : null
+  } catch {
+    const normalizedValue = trimmedValue.toLowerCase()
+
+    if (
+      normalizedValue.length === 2 &&
+      [...normalizedValue].every((char) => char >= 'a' && char <= 'z')
+    ) {
+      return normalizedValue
+    }
+
+    return null
+  }
 }
 
 /**
@@ -230,25 +260,33 @@ export async function extractArchive(
   const basename = path.basename(archivePath).toLowerCase()
 
   try {
-    if (ext === '.zip') {
-      // Use unzip for .zip files (available on all platforms)
-      // -o: overwrite files without prompting
-      // -q: quiet mode
-      // -d: extract to directory
-      execSync(`unzip -o -q "${archivePath}" -d "${targetPath}"`, {
-        stdio: 'inherit'
-      })
+    if (ZIP_ARCHIVE_EXTENSIONS.has(ext)) {
+      if (isWindows()) {
+        execFileSync('tar', ['-xf', archivePath, '-C', targetPath], {
+          stdio: 'inherit',
+          windowsHide: true
+        })
+      } else {
+        execFileSync('unzip', ['-o', '-q', archivePath, '-d', targetPath], {
+          stdio: 'inherit',
+          windowsHide: true
+        })
+      }
     } else if (
       basename.endsWith('.tar.gz') ||
       basename.endsWith('.tar.xz') ||
       basename.endsWith('.tgz') ||
       ext === '.tar'
     ) {
-      // Use tar for .tar.* files (available on all platforms)
-      const stripFlag =
-        stripComponents > 0 ? `--strip-components=${stripComponents}` : ''
-      execSync(`tar -xf "${archivePath}" -C "${targetPath}" ${stripFlag}`, {
-        stdio: 'inherit'
+      const tarArgs = ['-xf', archivePath, '-C', targetPath]
+
+      if (stripComponents > 0) {
+        tarArgs.push(`--strip-components=${stripComponents}`)
+      }
+
+      execFileSync('tar', tarArgs, {
+        stdio: 'inherit',
+        windowsHide: true
       })
     } else {
       throw new Error(`Unsupported archive format: ${archivePath}`)

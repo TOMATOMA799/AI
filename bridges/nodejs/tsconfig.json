@@ -7,9 +7,13 @@
     "paths": {
       "@@/*": ["../../*"],
       "@/*": ["../../server/src/*"],
+      "@aurora/style.css": ["../../aurora/style.css"],
+      "@aurora": ["../../aurora/dist/index.d.ts"],
+      "@aurora/*": ["../../aurora/dist/*"],
       "@server/*": ["../../server/src/*"],
       "@bridge/*": ["./src/*"],
-      "@sdk/*": ["./src/sdk/*"]
+      "@sdk/*": ["./src/sdk/*"],
+      "@tools/*": ["../../tools/*/src/nodejs/index.ts", "../../tools/*.ts"]
     },
     "exactOptionalPropertyTypes": false,
     "declaration": true

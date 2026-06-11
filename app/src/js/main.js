@@ -1,10 +1,13 @@
 import axios from 'axios'
-import '@leon-ai/aurora/style.css'
+import '@aurora/style.css'
 
 window.leonInitStatusEvent = new EventTarget()
 
 import './init'
 import Client from './client'
+import { BuiltInCommands } from './built-in-commands'
+import FileSystemAutocomplete from './file-system-autocomplete'
+import SessionsPanel from './sessions'
 // import Recorder from './recorder'
 // import listener from './listener'
 import { onkeydownstartrecording, onkeydowninput } from './onkeydown'
@@ -23,12 +26,47 @@ const serverUrl =
 
 document.addEventListener('DOMContentLoaded', async () => {
   try {
-    const response = await axios.get(`${serverUrl}/api/v1/info`)
+    const [response, sessionsResponse] = await Promise.all([
+      axios.get(`${serverUrl}/api/v1/info`),
+      axios.get(`${serverUrl}/api/v1/sessions`)
+    ])
     const input = document.querySelector('#utterance')
     const mic = document.querySelector('#mic-button')
     const v = document.querySelector('#version small')
     const infoButton = document.querySelector('#info')
-    const client = new Client(config.app, serverUrl, input)
+    const client = new Client(config.app, serverUrl, input, {
+      activeSessionId: sessionsResponse.data.active_session_id
+    })
+    const sessionsPanel = new SessionsPanel({
+      serverUrl,
+      socket: client.socket,
+      activeSessionId: sessionsResponse.data.active_session_id,
+      initialPayload: sessionsResponse.data,
+      onSelect: (sessionId) => client.setActiveSession(sessionId)
+    })
+    const fileSystemAutocomplete = new FileSystemAutocomplete({
+      serverUrl,
+      input
+    })
+    const builtInCommands = new BuiltInCommands({
+      serverUrl,
+      input,
+      getActiveSessionId: () => sessionsPanel.getActiveSessionId(),
+      onCommandExecuted: (commandInput) => {
+        if (commandInput.trim().startsWith('/session')) {
+          void sessionsPanel.refresh()
+        }
+      },
+      onSubmitToChat: (clientAction) => {
+        return client.sendUtterance(clientAction.utterance, {
+          commandContext: {
+            forcedRoutingMode: clientAction.command_context?.forced_routing_mode,
+            forcedSkillName: clientAction.command_context?.forced_skill_name,
+            forcedToolName: clientAction.command_context?.forced_tool_name
+          }
+        })
+      }
+    })
     // let rec = {}
     // let chunks = []
 
@@ -42,10 +80,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       'freeVRAM',
       'usedVRAM',
       'llm',
-      'shouldWarmUpLLMDuties',
-      'isLLMActionRecognitionEnabled',
-      'isLLMNLGEnabled',
-      'stt',
+      'asr',
       'tts',
       'mood',
       'version'
@@ -58,7 +93,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     v.textContent += window.leonConfigInfo.version
 
     client.updateMood(window.leonConfigInfo.mood)
+    client.setSessionPanel(sessionsPanel)
+    sessionsPanel.init()
     client.init()
+    fileSystemAutocomplete.attach(input)
+    builtInCommands.init()
 
     infoButton.addEventListener('click', () => {
       alert(JSON.stringify(infoToDisplay, null, 2))

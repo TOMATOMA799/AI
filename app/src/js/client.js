@@ -2,27 +2,44 @@ import { io } from 'socket.io-client'
 
 import Chatbot from './chatbot'
 import VoiceEnergy from './voice-energy'
-import { INIT_MESSAGES } from './constants'
+import { ASR_DISABLED_MESSAGE, INIT_MESSAGES } from './constants'
 import handleSuggestions from './suggestion-handler.js'
 
+const LEON_CLIENT_INTERFACE_PROTOCOL_VERSION = 1
+const LEON_EVENTS = {
+  init: 'leon:init',
+  utterance: 'leon:utterance',
+  ready: 'leon:ready',
+  answer: 'leon:answer',
+  isTyping: 'leon:is-typing',
+  suggest: 'leon:suggest',
+  llmToken: 'leon:llm-token',
+  llmReasoningToken: 'leon:llm-reasoning-token',
+  ownerUtterance: 'leon:owner-utterance',
+  error: 'leon:error'
+}
+
 export default class Client {
-  constructor(client, serverUrl, input) {
+  constructor(client, serverUrl, input, options = {}) {
     this.client = client
     this._input = input
-    this._suggestionContainer = document.querySelector('#suggestions-container')
     this.voiceSpeechElement = document.querySelector('#voice-speech')
     this.serverUrl = serverUrl
     this.socket = io(this.serverUrl)
+    this.activeSessionId = options.activeSessionId || null
     this.history = localStorage.getItem('history')
     this.parsedHistory = []
-    this.chatbot = new Chatbot(this.socket, this.serverUrl)
+    this.chatbot = new Chatbot(this.socket, this.serverUrl, this.activeSessionId)
     this.voiceEnergy = new VoiceEnergy(this)
     this._recorder = {}
     this._suggestions = []
     this._answerGenerationId = 'xxx'
+    this._activeStreamGenerationId = null
     this._ttsAudioContext = null
     this._isLeonGeneratingAnswer = false
     this._isVoiceModeEnabled = false
+    this._hasSentInitMessages = false
+    this._chatbotInitPromise = null
     // this._ttsAudioContextes = {}
   }
 
@@ -45,12 +62,30 @@ export default class Client {
   }
 
   updateMood(mood) {
-    if (window.leonConfigInfo.llm.enabled) {
-      const moodContainer = document.querySelector('#mood')
+    const moodContainer = document.querySelector('#mood')
 
-      moodContainer.textContent = `Leon's mood: ${mood.emoji}`
-      moodContainer.setAttribute('title', mood.type)
+    if (!moodContainer || !mood?.emoji || !mood?.type) {
+      return
     }
+
+    moodContainer.textContent = `Leon's mood: ${mood.emoji}`
+    moodContainer.setAttribute('title', mood.type)
+  }
+
+  setSessionPanel(sessionPanel) {
+    this.sessionPanel = sessionPanel
+  }
+
+  async setActiveSession(sessionId) {
+    if (!sessionId || sessionId === this.activeSessionId) {
+      return
+    }
+
+    this.activeSessionId = sessionId
+    this.chatbot.setSessionId(sessionId)
+    this.socket.emit('session-change', sessionId)
+    await this.chatbot.loadFeed()
+    this.chatbot.scrollDown({ force: true })
   }
 
   async sendInitMessages() {
@@ -82,9 +117,37 @@ export default class Client {
     )
   }
 
+  waitForInitUICompletion() {
+    if (this._hasSentInitMessages || this.chatbot.parsedBubbles?.length > 0) {
+      return
+    }
+
+    const trySendInitMessages = () => {
+      const initializedInitElement = document.querySelector('#init .initialized')
+
+      if (!initializedInitElement) {
+        return false
+      }
+
+      this._hasSentInitMessages = true
+      this.sendInitMessages()
+      return true
+    }
+
+    if (trySendInitMessages()) {
+      return
+    }
+
+    const interval = setInterval(() => {
+      if (trySendInitMessages()) {
+        clearInterval(interval)
+      }
+    }, 100)
+  }
+
   asrStartRecording() {
-    if (!window.leonConfigInfo.stt.enabled) {
-      console.warn('ASR is not enabled')
+    if (!window.leonConfigInfo.asr.enabled) {
+      alert(ASR_DISABLED_MESSAGE)
       return
     }
 
@@ -98,47 +161,65 @@ export default class Client {
   }
 
   init() {
-    this.chatbot.init()
+    this._chatbotInitPromise = this.chatbot.init()
     this.voiceEnergy.init()
 
+    if (window.leonConfigInfo?.tcpServer?.enabled === false) {
+      this.setInitStatus('tcpServerBoot', 'success')
+    }
+
     this.socket.on('connect', () => {
-      this.socket.emit('init', this.client)
+      this.socket.emit(LEON_EVENTS.init, {
+        protocolVersion: LEON_CLIENT_INTERFACE_PROTOCOL_VERSION,
+        client: {
+          id: this.client,
+          type: 'web_app',
+          name: 'Leon Web App'
+        },
+        sessionId: this.activeSessionId,
+        capabilities: {
+          supportsWidgets: true,
+          supportsTokenStreaming: true,
+          supportsVoice: true
+        }
+      })
     })
 
     /**
      * Init status listeners
      */
-    this.socket.on('init-client-core-server-handshake', (status) => {
-      this.setInitStatus('clientCoreServerHandshake', status)
-    })
-    this.socket.on('init-tcp-server-boot', (status) => {
-      this.setInitStatus('tcpServerBoot', status)
-    })
-    this.socket.on('init-llm', (status) => {
-      this.setInitStatus('llm', status)
-    })
-    this.socket.on('warmup-llm-duties', (status) => {
-      this.setInitStatus('llmDutiesWarmUp', status)
+    this.socket.on('init-llama-server-boot', (status) => {
+      this.setInitStatus('llamaServerBoot', status)
     })
 
-    this.socket.on('ready', () => {
-      setTimeout(() => {
-        const body = document.querySelector('body')
-        body.classList.remove('settingup')
-      }, 250)
+    this.socket.on(LEON_EVENTS.ready, () => {
+      this.setInitStatus('clientCoreServerHandshake', 'success')
+      this.setInitStatus('tcpServerBoot', 'success')
 
-      if (this.chatbot.parsedBubbles?.length === 0) {
-        this.sendInitMessages()
-      }
+      void this._chatbotInitPromise?.then(() => {
+        setTimeout(() => {
+          const body = document.querySelector('body')
+          body.classList.remove('settingup')
+        }, 250)
+
+        this.waitForInitUICompletion()
+      })
     })
 
-    this.socket.on('answer', (data) => {
+    this.socket.on(LEON_EVENTS.answer, (data) => {
       /*if (this._isVoiceModeEnabled) {
         this.voiceEnergy.status = 'listening'
       }*/
 
       // Leon has finished to answer
       this._isLeonGeneratingAnswer = false
+
+      const isPlanWidget =
+        data && typeof data === 'object' && data.widget === 'PlanWidget'
+
+      if (isPlanWidget) {
+        this.chatbot.isTyping('leon', false)
+      }
 
       /**
        * Handle message replacement if replaceMessageId is provided
@@ -160,6 +241,7 @@ export default class Client {
        * Handle widget data directly
        */
       if (data.widget || data.componentTree) {
+        const isSystemWidget = this.chatbot.isSystemWidgetData(data)
         // Pass the entire widget data as JSON string for chatbot.js to handle
         const widgetString =
           typeof data === 'string' ? data : JSON.stringify(data)
@@ -167,38 +249,83 @@ export default class Client {
         this.chatbot.createBubble({
           who: 'leon',
           string: widgetString,
+          save: !isSystemWidget,
           messageId: data.widget?.id || data.id || `msg-${Date.now()}`
         })
 
         return
       }
 
+      const answerText = typeof data === 'string' ? data : data.answer
+      const llmMetrics =
+        data && typeof data === 'object' && data.llmMetrics
+          ? data.llmMetrics
+          : null
+
       /**
        * Just save the bubble if the newest bubble is from the streaming.
        * Otherwise, create a new bubble
        */
-      const newestBubbleContainerElement =
-        document.querySelector('.leon:last-child')
-      const isNewestBubbleFromStreaming =
-        newestBubbleContainerElement?.classList.contains(
-          this._answerGenerationId
-        )
+      const streamGenerationId =
+        this._activeStreamGenerationId || this._answerGenerationId
+      const streamedBubbleContainerElement = streamGenerationId
+        ? document.querySelector(
+            `.bubble-container.leon.${streamGenerationId}`
+          )
+        : null
+      const isBubbleFromStreaming = Boolean(streamedBubbleContainerElement)
 
-      if (isNewestBubbleFromStreaming) {
-        this.chatbot.saveBubble('leon', data)
+      if (isBubbleFromStreaming && streamedBubbleContainerElement) {
+        this.chatbot.saveBubble(
+          'leon',
+          answerText,
+          answerText,
+          null,
+          llmMetrics,
+          data && typeof data === 'object' && typeof data.sentAt === 'number'
+            ? data.sentAt
+            : Date.now()
+        )
 
         // Slightly delay the update to avoid the stream animation to be interrupted
         setTimeout(() => {
           // Update the text of the bubble (quick emoji fix)
-          newestBubbleContainerElement.querySelector('p.bubble').innerHTML =
-            this.chatbot.formatMessage(data)
+          streamedBubbleContainerElement.querySelector('p.bubble').innerHTML =
+            this.chatbot.formatMessage(answerText)
+          this.chatbot.updateBubbleMetrics(
+            streamedBubbleContainerElement,
+            llmMetrics,
+            data && typeof data === 'object' && typeof data.sentAt === 'number'
+              ? data.sentAt
+              : Date.now()
+          )
         }, 2_500)
       } else {
-        this.chatbot.receivedFrom('leon', data)
+        this.chatbot.createBubble({
+          who: 'leon',
+          string: answerText,
+          save:
+            !(
+              data &&
+              typeof data === 'object' &&
+              data.historyMode === 'system_widget'
+            ),
+          metrics: llmMetrics,
+          messageId: data && typeof data === 'object' ? data.messageId : null,
+          sentAt:
+            data && typeof data === 'object' && typeof data.sentAt === 'number'
+              ? data.sentAt
+              : Date.now()
+        })
       }
+      this.chatbot.scrollDown({ force: true })
+
+      this._activeStreamGenerationId = null
+      this._answerGenerationId = 'xxx'
+      void this.sessionPanel?.refresh()
     })
 
-    this.socket.on('suggest', (data) => {
+    this.socket.on(LEON_EVENTS.suggest, (data) => {
       setTimeout(() => {
         handleSuggestions(data, this.chatbot, this)
       }, 400)
@@ -210,8 +337,21 @@ export default class Client {
       })*/
     })
 
-    this.socket.on('is-typing', (data) => {
+    this.socket.on(LEON_EVENTS.isTyping, (data) => {
       this.chatbot.isTyping('leon', data)
+    })
+
+    this.socket.on(LEON_EVENTS.ownerUtterance, (data) => {
+      if (!data?.utterance) {
+        return
+      }
+
+      this.chatbot.createBubble({
+        who: 'me',
+        string: data.utterance,
+        messageId: data.messageId,
+        sentAt: typeof data.sentAt === 'number' ? data.sentAt : Date.now()
+      })
     })
 
     this.socket.on('recognized', (data, cb) => {
@@ -230,7 +370,7 @@ export default class Client {
       this.updateMood(mood)
     })
 
-    this.socket.on('llm-token', (data) => {
+    this.socket.on(LEON_EVENTS.llmToken, (data) => {
       if (this._isVoiceModeEnabled) {
         this.voiceEnergy.status = 'processing'
       }
@@ -239,6 +379,7 @@ export default class Client {
       const previousGenerationId = this._answerGenerationId
       const newGenerationId = data.generationId
       this._answerGenerationId = newGenerationId
+      this._activeStreamGenerationId = newGenerationId
       const isSameGeneration = previousGenerationId === newGenerationId
       let bubbleContainerElement = null
 
@@ -268,6 +409,24 @@ export default class Client {
         bubbleElement.appendChild(tokenSpan)
       }
 
+      this.chatbot.scrollDown()
+    })
+
+    this.socket.on(LEON_EVENTS.llmReasoningToken, (data) => {
+      if (!data?.generationId || !data?.token) {
+        return
+      }
+
+      if (this._isVoiceModeEnabled) {
+        this.voiceEnergy.status = 'processing'
+      }
+
+      this._isLeonGeneratingAnswer = true
+      this.chatbot.createOrUpdateReasoningBlock(
+        data.generationId,
+        data.token,
+        data.phase
+      )
       this.chatbot.scrollDown()
     })
 
@@ -330,6 +489,10 @@ export default class Client {
 
     this.socket.on('tts-end-of-speech', async () => {
       this.voiceEnergy.status = 'listening'
+
+      if (window.leonConfigInfo?.asr?.enabled) {
+        this.socket.emit('asr-start-record')
+      }
     })
 
     this.socket.on('audio-forwarded', (data, cb) => {
@@ -377,40 +540,55 @@ export default class Client {
       cb('audio-received')
     })
 
+    this.socket.on(LEON_EVENTS.error, (data) => {
+      console.error('Leon client interface error:', data)
+    })
+
     if (this.history !== null) {
       this.parsedHistory = JSON.parse(this.history)
     }
   }
 
   send(keyword) {
-    // Prevent from sending utterance if Leon is still generating text (stream)
-    if (keyword === 'utterance' && this._isLeonGeneratingAnswer) {
-      return false
-    }
-
-    if (this._input.value !== '') {
-      this.socket.emit(keyword, {
-        client: this.client,
-        value: this._input.value.trim()
-      })
-      this.chatbot.sendTo('leon', this._input.value)
-
-      this._suggestions.forEach((suggestion) => {
-        // Remove all event listeners of the suggestion
-        suggestion.replaceWith(suggestion.cloneNode(true))
-        this._suggestionContainer.replaceChildren()
-      })
-
-      this.save()
-
-      return true
+    if (keyword === 'utterance') {
+      return this.sendUtterance(this._input.value)
     }
 
     return false
   }
 
-  save() {
-    let val = this._input.value
+  sendUtterance(value, options = {}) {
+    if (this._isLeonGeneratingAnswer) {
+      return false
+    }
+
+    const trimmedValue = String(value || '').trim()
+
+    if (trimmedValue === '') {
+      return false
+    }
+
+    const sentAt =
+      typeof options.sentAt === 'number' ? options.sentAt : Date.now()
+
+    this.socket.emit(LEON_EVENTS.utterance, {
+      value: trimmedValue,
+      sentAt,
+      sessionId: this.activeSessionId,
+      ...(options.commandContext
+        ? { commandContext: options.commandContext }
+        : {})
+    })
+    this.chatbot.sendTo('leon', trimmedValue, sentAt)
+    this.chatbot.scrollDown({ force: true })
+
+    this.save(trimmedValue)
+
+    return true
+  }
+
+  save(value = this._input.value) {
+    let val = value
 
     if (localStorage.getItem('history') === null) {
       localStorage.setItem('history', JSON.stringify([]))
@@ -434,22 +612,6 @@ export default class Client {
       this._input.value = this._input.value.slice(0, -1)
     }, 0)
   }
-
-  /*addSuggestion(text) {
-    const newSuggestion = document.createElement('button')
-    newSuggestion.classList.add('suggestion')
-    newSuggestion.textContent = text
-
-    this._suggestionContainer.appendChild(newSuggestion)
-
-    newSuggestion.addEventListener('click', (e) => {
-      e.preventDefault()
-      this.input = e.target.textContent
-      this.send('utterance')
-    })
-
-    this._suggestions.push(newSuggestion)
-  }*/
 
   enableVoiceMode() {
     if (!this._isVoiceModeEnabled) {

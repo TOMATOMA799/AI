@@ -1,43 +1,23 @@
-import { fileURLToPath } from 'node:url'
-import path from 'node:path'
-
-import { fixupConfigRules, fixupPluginRules } from '@eslint/compat'
+import stylistic from '@stylistic/eslint-plugin'
 import typescriptEslint from '@typescript-eslint/eslint-plugin'
-import stylisticTs from '@stylistic/eslint-plugin-ts'
 import unicorn from 'eslint-plugin-unicorn'
-import _import from 'eslint-plugin-import'
+import importPlugin from 'eslint-plugin-import'
 import globals from 'globals'
 import tsParser from '@typescript-eslint/parser'
 import js from '@eslint/js'
-import { FlatCompat } from '@eslint/eslintrc'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const compat = new FlatCompat({
-  baseDirectory: __dirname,
-  recommendedConfig: js.configs.recommended,
-  allConfig: js.configs.all
-})
 
 export default [
   {
-    ignores: ['**/*.spec.js']
+    ignores: ['**/*.spec.js', 'aurora/dist/**']
   },
-  ...fixupConfigRules(
-    compat.extends(
-      'eslint:recommended',
-      'plugin:@typescript-eslint/recommended',
-      'plugin:import/recommended',
-      'plugin:import/typescript',
-      'prettier'
-    )
-  ),
+  js.configs.recommended,
+  ...typescriptEslint.configs['flat/recommended'],
+  importPlugin.flatConfigs.recommended,
+  importPlugin.flatConfigs.typescript,
   {
     plugins: {
-      '@typescript-eslint': fixupPluginRules(typescriptEslint),
-      '@stylistic/ts': stylisticTs,
-      unicorn,
-      import: fixupPluginRules(_import)
+      '@stylistic': stylistic,
+      unicorn
     },
     languageOptions: {
       globals: {
@@ -46,7 +26,7 @@ export default [
       },
       parser: tsParser,
       ecmaVersion: 'latest',
-      sourceType: 'commonjs'
+      sourceType: 'module'
     },
     settings: {
       'import/resolver': {
@@ -65,10 +45,13 @@ export default [
       ],
       'prefer-destructuring': ['off'],
       'comma-dangle': ['error', 'never'],
+      '@stylistic/comma-dangle': ['error', 'never'],
       semi: ['error', 'never'],
+      quotes: ['error', 'single'],
+      '@stylistic/quotes': ['error', 'single'],
       'object-curly-spacing': ['error', 'always'],
       'unicorn/prefer-node-protocol': 'error',
-      '@stylistic/ts/member-delimiter-style': [
+      '@stylistic/member-delimiter-style': [
         'error',
         {
           multiline: {
@@ -85,20 +68,7 @@ export default [
       '@typescript-eslint/consistent-type-definitions': 'error',
       'import/no-named-as-default': 'off',
       'import/no-named-as-default-member': 'off',
-      'import/order': [
-        'error',
-        {
-          groups: [
-            'builtin',
-            'external',
-            'internal',
-            'parent',
-            'sibling',
-            'index'
-          ],
-          'newlines-between': 'always'
-        }
-      ]
+      'import/order': 'off'
     }
   },
   {

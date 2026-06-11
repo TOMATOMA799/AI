@@ -296,6 +296,17 @@
         <p id="voice-speech"></p>
       </div>
     </div>
+    <aside id="sessions-panel" aria-label="Sessions">
+      <div id="sessions-header">
+        <div>
+          <span id="sessions-eyebrow">Sessions</span>
+        </div>
+        <button id="new-session" type="button" aria-label="New session">
+          <i class="ri-add-line"></i>
+        </button>
+      </div>
+      <div id="sessions-list"></div>
+    </aside>
     <main>
       <div id="top-container">
         <div id="mood"></div>
@@ -303,10 +314,9 @@
       </div>
       <div id="feed">
         <p id="no-bubble" class="hide">
-          You can start to interact with Leon, don't be shy.
+          You can start to interact with me, don't be shy.
         </p>
       </div>
-      <div id="suggestions-container"></div>
       <div id="is-typing">
         <div class="circle"></div>
         <div class="circle"></div>
@@ -326,21 +336,29 @@
             <kbd>shift</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> to browse history.
           </li>
           <li><kbd>alt</kbd> / <kbd>cmd</kbd> + <kbd>c</kbd> to listen.</li>
+          <li><kbd>/</kbd> for commands.</li>
+          <li><kbd>@</kbd> for files.</li>
         </ul>
       </div>
     </main>
-    <footer>
-      <div id="logo"></div>
-      <br />
-      <div id="version">
-        <small>v</small>
+    <footer id="footer">
+      <div id="logo-container">
+        <div id="logo"></div>
+        <div>
+          <small>Leon AI</small>
+          <div id="version">
+            <small>v</small>
+          </div>
+        </div>
       </div>
-      <div id="discord">
-        <small class="italic">
-          <a href="https://discord.gg/MNQqqKg" target="_blank"
+      <div id="discord-container">
+        <div>
+          <small>
+            <a href="https://discord.gg/MNQqqKg" target="_blank"
             >Join us on Discord</a
-          >
-        </small>
+            >
+          </small>
+        </div>
       </div>
     </footer>
     <script type="module" src="/js/main.js"></script>

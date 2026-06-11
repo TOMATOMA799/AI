@@ -11,9 +11,7 @@ import type {
   SkillConfigSchema,
   SkillAnswerConfigSchema
 } from '@/schemas/skill-schemas'
-import type { ShortLanguageCode } from '@/types'
-import type { WidgetWrapper } from '@sdk/aurora'
-import type { SUPPORTED_WIDGET_EVENTS } from '@sdk/widget-component'
+import type { ConversationWidgetData, ShortLanguageCode } from '@/types'
 
 export interface SkillResult {
   domain: NLPDomain
@@ -25,15 +23,12 @@ export interface SkillResult {
   slots: NLUSlots
   output: {
     codes: string[]
-    answer: string
+    answer: SkillAnswerConfigSchema
     core: SkillAnswerCoreData | undefined
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     options: Record<string, any>
     replaceMessageId?: string | null
-    widget?: {
-      componentTree: WidgetWrapper
-      supportedEvents: typeof SUPPORTED_WIDGET_EVENTS
-    }
+    widget?: ConversationWidgetData
   }
 }
 
@@ -72,7 +67,7 @@ export interface ActionParams {
     name: string
     bridge: SkillBridges
     version: string
-    flow: string[]
+    workflow: string[]
   }
   skill_config_path: string
   extra_context: {
@@ -85,18 +80,6 @@ export interface ActionParams {
   }
 }
 
-// TODO: delete
-/*export interface ActionParams {
-  lang: ShortLanguageCode
-  utterance: NLPUtterance
-  new_utterance: NLPUtterance
-  current_entities: NEREntity[]
-  entities: NEREntity[]
-  current_resolvers: NLUResolver[]
-  resolvers: NLUResolver[]
-  slots: { [key: string]: NLUSlot['value'] | undefined }
-}*/
-
 export interface IntentObject {
   id: string
   lang: ShortLanguageCode
@@ -107,7 +90,7 @@ export interface IntentObject {
     name: NLUProcessResult['skillConfig']['name']
     bridge: NLUProcessResult['skillConfig']['bridge']
     version: NLUProcessResult['skillConfig']['version']
-    flow: NLUProcessResult['skillConfig']['flow']
+    workflow: NLUProcessResult['skillConfig']['workflow']
   }
   skill_config_path: NLUProcessResult['skillConfigPath']
   utterance: NLUProcessResult['new']['utterance']
@@ -134,6 +117,7 @@ export interface IntentObject {
 export interface SkillAnswerCoreData {
   is_in_action_loop?: boolean
   next_action?: string
+  should_stop_skill?: boolean
   // Tool-related properties for identifying tool outputs
   isToolOutput?: boolean
   toolkitName?: string
@@ -148,17 +132,7 @@ export interface SkillAnswerOutput extends IntentObject {
     answer: SkillAnswerConfigSchema
     core?: SkillAnswerCoreData
     replaceMessageId?: string | null
-    widget?: {
-      actionName: string
-      widget: string
-      id: string
-      componentTree: WidgetWrapper
-      supportedEvents: typeof SUPPORTED_WIDGET_EVENTS
-      onFetch: {
-        widgetId?: string
-        actionName: string
-      } | null
-    }
+    widget?: ConversationWidgetData
   }
 }
 

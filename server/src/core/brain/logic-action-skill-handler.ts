@@ -11,12 +11,19 @@ import type {
 import { SkillBridges } from '@/core/brain/types'
 import {
   TMP_PATH,
-  PYTHON_BRIDGE_BIN_PATH,
-  NODEJS_BRIDGE_BIN_PATH
+  NODEJS_BRIDGE_ENTRY_PATH,
+  NODE_RUNTIME_BIN_PATH,
+  PYTHON_BRIDGE_ENTRY_PATH,
+  PYTHON_BRIDGE_RUNTIME_BIN_PATH,
+  TSX_CLI_PATH
 } from '@/constants'
-import { BRAIN, SOCKET_SERVER, NLU } from '@/core'
+import { BRAIN, SOCKET_SERVER, NLU, CONVERSATION_LOGGER } from '@/core'
 import { LogHelper } from '@/helpers/log-helper'
 import { DateHelper } from '@/helpers/date-helper'
+import { RuntimeHelper } from '@/helpers/runtime-helper'
+import { ConversationHistoryHelper } from '@/helpers/conversation-history-helper'
+
+const SYSTEM_WIDGET_HISTORY_MODE = 'system_widget'
 
 export class LogicActionSkillHandler {
   public static async handle(
@@ -38,11 +45,30 @@ export class LogicActionSkillHandler {
       BRAIN.skillFriendlyName = skillFriendlyName
 
       let buffer = ''
+      let stderrBuffer = ''
       let lastSkillResult: SkillResult | undefined = undefined
+
+      const flushBufferedOutput = (): void => {
+        if (!buffer.trim()) {
+          return
+        }
+
+        try {
+          const skillResult = JSON.parse(buffer) as SkillResult
+
+          lastSkillResult = skillResult
+          this.handleLogicActionSkillProcessOutput(skillResult)
+          buffer = ''
+        } catch (e) {
+          LogHelper.title(`${BRAIN.skillFriendlyName} skill`)
+          LogHelper.error(`Error on the final output: ${String(e)}`)
+          stderrBuffer += `${stderrBuffer ? '\n' : ''}${String(e)}`
+        }
+      }
 
       // Read skill output
       BRAIN.skillProcess?.stdout.on('data', (data: Buffer) => {
-        SOCKET_SERVER.socket?.emit('is-typing', true)
+        SOCKET_SERVER.emitToChatClients('is-typing', true)
         buffer += data.toString()
 
         let newlineIndex
@@ -78,31 +104,37 @@ export class LogicActionSkillHandler {
         }
       })
 
-      // Handle error
+      // stderr can contain regular progress logs from underlying tools, so do not
+      // surface it as a broken skill until the process has actually failed.
       BRAIN.skillProcess?.stderr.on('data', (data: Buffer) => {
-        this.handleLogicActionSkillProcessError(data, intentObjectPath)
+        const chunk = data.toString()
+        stderrBuffer += chunk
+        this.handleLogicActionSkillProcessError(chunk)
+      })
+
+      BRAIN.skillProcess?.on('error', (error: Error) => {
+        stderrBuffer += `${stderrBuffer ? '\n' : ''}${error.message}`
       })
 
       // Catch the end of the skill execution
-      BRAIN.skillProcess?.stdout.on('end', () => {
-        LogHelper.title(`${BRAIN.skillFriendlyName} skill (on end)`)
-
-        // Attempt to process any remaining data in the buffer
-        if (buffer.trim()) {
-          try {
-            const skillResult = JSON.parse(buffer) as SkillResult
-
-            lastSkillResult = skillResult
-            this.handleLogicActionSkillProcessOutput(skillResult)
-          } catch (e) {
-            LogHelper.title(`${BRAIN.skillFriendlyName} skill`)
-            LogHelper.error(`Error on the final output: ${String(e)}`)
-
-            BRAIN.speakSkillError()
-          }
-        }
-
+      BRAIN.skillProcess?.on('close', (code: number | null) => {
+        LogHelper.title(`${BRAIN.skillFriendlyName} skill (on close)`)
+        flushBufferedOutput()
         this.deleteIntentObjFile(intentObjectPath)
+
+        const failureReason = this.getSkillFailureReason(stderrBuffer)
+        const hasUserFacingOutput = Boolean(
+          lastSkillResult?.output?.answer || lastSkillResult?.output?.widget
+        )
+
+        if ((code !== 0 || !lastSkillResult) && !hasUserFacingOutput) {
+          BRAIN.speakSkillError(
+            failureReason ||
+              (code !== null
+                ? `Process exited with code ${code}.`
+                : 'The skill process exited unexpectedly.')
+          )
+        }
 
         resolve({
           utteranceId,
@@ -112,11 +144,9 @@ export class LogicActionSkillHandler {
           lastOutputFromSkill: lastSkillResult?.output
         })
 
-        SOCKET_SERVER.socket?.emit('is-typing', false)
+        SOCKET_SERVER.emitToChatClients('is-typing', false)
+        BRAIN.skillProcess = undefined
       })
-
-      // Reset the child process
-      BRAIN.skillProcess = undefined
     })
   }
 
@@ -145,24 +175,51 @@ export class LogicActionSkillHandler {
     LogHelper.title(`${BRAIN.skillFriendlyName} skill (on data)`)
     LogHelper.info(JSON.stringify(skillAnswer))
 
+    const answerText = ConversationHistoryHelper.getAnswerText(
+      skillAnswer.output.answer
+    )
+    const replaceMessageId = skillAnswer.output.replaceMessageId || null
+
     /**
      * Handle widget answers
-     *
-     * Verify the brain is not muted since when we fetch widgets we should
-     * not speak the answers
      */
-    if (skillAnswer.output.widget && !BRAIN.isMuted) {
+    if (skillAnswer.output.widget) {
+      const widget = skillAnswer.output.widget
+
+      if (ConversationHistoryHelper.isWidgetPersisted(widget)) {
+        void CONVERSATION_LOGGER.upsert(
+          {
+            who: 'leon',
+            message: widget.fallbackText || answerText,
+            messageId: replaceMessageId || widget.id,
+            isAddedToHistory: widget.historyMode !== SYSTEM_WIDGET_HISTORY_MODE,
+            widget
+          },
+          {
+            replaceMessageId
+          }
+        )
+      }
+
+      if (BRAIN.isMuted) {
+        return
+      }
+
       try {
+        if (widget.historyMode !== SYSTEM_WIDGET_HISTORY_MODE) {
+          return
+        }
+
         /**
          * Send widget data with replaceMessageId (to target the same message id for the client).
          * Useful for a progress report, etc.
          */
         const answerData = {
-          ...skillAnswer.output.widget,
-          replaceMessageId: skillAnswer.output.replaceMessageId || null
+          ...widget,
+          replaceMessageId
         }
 
-        SOCKET_SERVER.socket?.emit('answer', answerData)
+        SOCKET_SERVER.emitAnswerToChatClients(answerData)
       } catch (e) {
         LogHelper.title('Brain')
         LogHelper.error(
@@ -174,7 +231,25 @@ export class LogicActionSkillHandler {
        * Handle non-widget answers
        */
       const { answer } = skillAnswer.output
-      if (answer && !BRAIN.isMuted) {
+      if (answer) {
+        if (replaceMessageId) {
+          void CONVERSATION_LOGGER.upsert(
+            {
+              who: 'leon',
+              message: answerText,
+              messageId: replaceMessageId,
+              isAddedToHistory: true
+            },
+            {
+              replaceMessageId
+            }
+          )
+        }
+
+        if (BRAIN.isMuted) {
+          return
+        }
+
         // Check if this is a tool output
         const isToolOutput = skillAnswer.output.core?.isToolOutput === true
 
@@ -190,19 +265,34 @@ export class LogicActionSkillHandler {
             replaceMessageId: skillAnswer.output.replaceMessageId || null
           }
 
-          SOCKET_SERVER.socket?.emit('answer', toolData)
+          SOCKET_SERVER.emitAnswerToChatClients(toolData)
         } else {
           // Handle regular skill answers
-          if (skillAnswer.output.replaceMessageId) {
+          if (replaceMessageId) {
             const answerData = {
-              answer,
-              replaceMessageId: skillAnswer.output.replaceMessageId
+              answer: answerText,
+              replaceMessageId
             }
 
-            SOCKET_SERVER.socket?.emit('answer', answerData)
+            SOCKET_SERVER.emitAnswerToChatClients(answerData)
           } else {
+            const shouldSkipParaphrase =
+              skillAnswer.output.codes.includes('error')
+            const queuedAnswer =
+              typeof answer === 'string'
+                ? {
+                    speech: answer,
+                    text: answer,
+                    ...(shouldSkipParaphrase ? { shouldSkipParaphrase } : {})
+                  }
+                : {
+                    speech: answer.speech,
+                    ...(answer.text ? { text: answer.text } : {}),
+                    ...(shouldSkipParaphrase ? { shouldSkipParaphrase } : {})
+                  }
+
             // For regular answers without replacement, use BRAIN.talk which handles the answer event
-            BRAIN.talk(answer, true)
+            BRAIN.talk(queuedAnswer, true)
           }
         }
       }
@@ -213,17 +303,25 @@ export class LogicActionSkillHandler {
    * Handle the skill process error
    */
   private static handleLogicActionSkillProcessError(
-    data: Buffer,
-    intentObjectPath: string
+    data: string
   ): Error {
-    BRAIN.speakSkillError()
-
-    this.deleteIntentObjFile(intentObjectPath)
-
     LogHelper.title(`${BRAIN.skillFriendlyName} skill`)
-    LogHelper.error(data.toString())
+    LogHelper.warning(data)
 
-    return new Error(data.toString())
+    return new Error(data)
+  }
+
+  private static getSkillFailureReason(stderrBuffer: string): string | null {
+    const lines = stderrBuffer
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+
+    if (lines.length === 0) {
+      return null
+    }
+
+    return lines.slice(-3).join(' ')
   }
 
   /**
@@ -254,14 +352,47 @@ export class LogicActionSkillHandler {
         const { bridge: skillBridge } = nluProcessResult.skillConfig
 
         if (skillBridge === SkillBridges.Python) {
+          const pythonBridgeCommandArgs = [
+            PYTHON_BRIDGE_ENTRY_PATH,
+            '--runtime',
+            'skill',
+            intentObjectPath
+          ]
+          const pythonBridgeCommand = RuntimeHelper.buildShellCommand(
+            PYTHON_BRIDGE_RUNTIME_BIN_PATH,
+            pythonBridgeCommandArgs
+          )
+
+          LogHelper.title('Brain')
+          LogHelper.info(`Running command: ${pythonBridgeCommand}`)
           BRAIN.skillProcess = spawn(
-            `${PYTHON_BRIDGE_BIN_PATH} "${intentObjectPath}"`,
-            { shell: true }
+            PYTHON_BRIDGE_RUNTIME_BIN_PATH,
+            pythonBridgeCommandArgs,
+            {
+              windowsHide: true
+            }
           )
         } else if (skillBridge === SkillBridges.NodeJS) {
+          const nodejsBridgeCommandArgs = [
+            TSX_CLI_PATH,
+            NODEJS_BRIDGE_ENTRY_PATH,
+            '--runtime',
+            'skill',
+            intentObjectPath
+          ]
+          const nodejsBridgeCommand = RuntimeHelper.buildShellCommand(
+            NODE_RUNTIME_BIN_PATH,
+            nodejsBridgeCommandArgs
+          )
+
+          LogHelper.title('Brain')
+          LogHelper.info(`Running command: ${nodejsBridgeCommand}`)
           BRAIN.skillProcess = spawn(
-            `${NODEJS_BRIDGE_BIN_PATH} "${intentObjectPath}"`,
-            { shell: true }
+            NODE_RUNTIME_BIN_PATH,
+            nodejsBridgeCommandArgs,
+            {
+              windowsHide: true
+            }
           )
         } else {
           LogHelper.error(`The skill bridge is not supported: ${skillBridge}`)
@@ -292,7 +423,7 @@ export class LogicActionSkillHandler {
         name: nluProcessResult.skillConfig.name,
         bridge: nluProcessResult.skillConfig.bridge as SkillBridges,
         version: nluProcessResult.skillConfig.version,
-        flow: nluProcessResult.skillConfig.flow as string[]
+        workflow: nluProcessResult.skillConfig.workflow as string[]
       },
       skill_config_path: nluProcessResult.skillConfigPath,
       utterance: nluProcessResult.new.utterance,

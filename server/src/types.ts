@@ -39,11 +39,94 @@ export enum CPUArchitectures {
 }
 
 /**
+ * Routing mode
+ */
+export enum RoutingMode {
+  Smart = 'smart',
+  Controlled = 'controlled',
+  Agent = 'agent'
+}
+
+/**
+ * Skill package format.
+ */
+export enum SkillFormat {
+  LeonNative = 'leon-native',
+  AgentSkill = 'agent-skill'
+}
+
+/**
+ * Mood
+ */
+export enum Moods {
+  Default = 'default',
+  Tired = 'tired',
+  Sad = 'sad',
+  Angry = 'angry',
+  Cocky = 'cocky'
+}
+
+/**
  * Logger
  */
+
+export type ConversationWidgetHistoryMode = 'persisted' | 'system_widget'
+export type ConversationItemSource = 'conversation_history' | 'system_widget'
+
+export interface ConversationWidgetData {
+  actionName: string
+  widget: string
+  id: string
+  componentTree: Record<string, unknown>
+  supportedEvents: string[]
+  onFetch: {
+    widgetId?: string
+    actionName: string
+  } | null
+  fallbackText: string
+  historyMode: ConversationWidgetHistoryMode
+}
+
+export interface LLMAnswerMetrics {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  finalAnswerOutputTokens?: number
+  durationMs: number
+  finalAnswerDurationMs?: number
+  finalAnswerTokensPerSecond?: number
+  finalAnswerCharsPerSecond?: number
+  outputCharsPerSecond?: number
+  averagedPhaseTokensPerSecond?: number
+  phaseMetrics?: {
+    planning: { outputTokens: number, durationMs: number, tokensPerSecond: number }
+    execution: { outputTokens: number, durationMs: number, tokensPerSecond: number }
+    recovery: { outputTokens: number, durationMs: number, tokensPerSecond: number }
+    final_answer: { outputTokens: number, durationMs: number, tokensPerSecond: number }
+  }
+  turnInputTokens?: number
+  turnOutputTokens?: number
+  turnTotalTokens?: number
+  ttftMs?: number
+  tokensPerSecond: number
+}
 
 export interface MessageLog {
   who: 'owner' | 'leon'
   sentAt: number
   message: string
+  isAddedToHistory: boolean
+  messageId?: string
+  widget?: ConversationWidgetData | null
+  llmMetrics?: LLMAnswerMetrics
+}
+
+export interface ConversationHistoryItem {
+  who: MessageLog['who']
+  sentAt: number
+  string: string
+  originalString: string
+  source: ConversationItemSource
+  messageId?: string
+  llmMetrics?: LLMAnswerMetrics
 }

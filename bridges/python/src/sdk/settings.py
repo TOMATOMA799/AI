@@ -3,12 +3,16 @@ import os
 from os import path
 from typing import Union, Any, overload
 
-from ..constants import SKILL_PATH
+from ..constants import PROFILE_NATIVE_SKILLS_PATH, SKILL_PATH
 
 
 class Settings:
     def __init__(self):
-        self.settings_path = path.join(SKILL_PATH, 'src', 'settings.json')
+        self.settings_path = path.join(
+            PROFILE_NATIVE_SKILLS_PATH,
+            path.basename(SKILL_PATH),
+            'settings.json'
+        )
         self.settings_sample_path = path.join(SKILL_PATH, 'src', 'settings.sample.json')
 
     def is_setting_set(self, key: str) -> bool:
@@ -75,13 +79,13 @@ class Settings:
         :param value: The value to set
         """
         try:
-            settings = self.get()
-
             if isinstance(key_or_settings, dict):
                 new_settings = key_or_settings
             else:
+                settings = self.get()
                 new_settings = {**settings, key_or_settings: value}
 
+            os.makedirs(path.dirname(self.settings_path), exist_ok=True)
             with open(self.settings_path, 'w') as file:
                 json.dump(new_settings, file, indent=2)
 

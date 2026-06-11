@@ -1,7 +1,7 @@
 import type { Static } from '@sinclair/typebox'
 import { Type } from '@sinclair/typebox'
 
-import { globalResolverSchemaObject } from '@/schemas/global-data-schemas'
+import { REMIX_ICON_NAME_PATTERN } from '@/constants'
 import { SkillBridges } from '@/core/brain/types'
 import { NLPAction } from '@/core/nlp/types'
 
@@ -58,12 +58,10 @@ const skillActionTypes = [
   }),
   Type.Literal('dialog', {
     description:
-      "Action that don't need code to run. Leon actually just answers without any business logic."
+      'Action that don\'t need code to run. Leon actually just answers without any business logic.'
   })
 ]
 const skillDataTypes = [
-  Type.Literal('skill_resolver'),
-  Type.Literal('global_resolver'),
   Type.Literal('entity'),
   Type.Literal('utterance')
 ]
@@ -149,29 +147,10 @@ const skillCustomTrimEntityType = Type.Object(
   },
   { additionalProperties: false }
 )
-const skillCustomLLMEntityType = Type.Object(
-  {
-    type: Type.Literal('llm', {
-      description:
-        'LLM: you can define an entity based on a JSON schema and the LLM (Large Language Model) will be able to grab it by itself based on the schema.'
-    }),
-    schema: Type.Object(
-      {
-        /**
-         * Any key is allowed
-         * @see https://github.com/withcatai/node-llama-cpp/blob/6b012a6/src/utils/gbnfJson/types.ts#L2
-         */
-      },
-      { additionalProperties: true }
-    )
-  },
-  { additionalProperties: false }
-)
 const skillCustomEntityTypes = [
   Type.Array(skillCustomTrimEntityType),
   Type.Array(skillCustomRegexEntityType),
-  Type.Array(skillCustomEnumEntityType),
-  Type.Array(skillCustomLLMEntityType)
+  Type.Array(skillCustomEnumEntityType)
 ]
 
 export const domainSchemaObject = Type.Strict(
@@ -238,6 +217,12 @@ export const skillLocaleConfigObject = Type.Strict(
 export const skillSchemaObject = Type.Strict(
   Type.Object({
     name: Type.String({ minLength: 1, description: 'The name of the skill.' }),
+    icon_name: Type.String({
+      minLength: 1,
+      pattern: REMIX_ICON_NAME_PATTERN,
+      description:
+        'Icon name from https://remixicon.com. Filled icons ending with "-fill" are not allowed.'
+    }),
     bridge: Type.Union(skillBridges, { description: 'Bridge SDK.' }),
     version: Type.String({
       minLength: 1,
@@ -273,10 +258,10 @@ export const skillSchemaObject = Type.Strict(
           'A person who has been involved in creating or maintaining this skill.'
       }
     ),
-    flow: Type.Optional(
+    workflow: Type.Optional(
       Type.Array(Type.String(), {
         description:
-          'The flow is a sequence of actions that will be executed in order. Only the first action in the flow will be added to the action calling to avoid overloading the context with too many actions.'
+          'The workflow is a sequence of actions that will be executed in order. Only the first action in the workflow will be added to the action calling to avoid overloading the context with too many actions.'
       })
     ),
     actions: Type.Record(
@@ -285,8 +270,8 @@ export const skillSchemaObject = Type.Strict(
         {
           type: Type.Union(skillActionTypes),
           description: Type.String({
-            minLength: 16,
-            maxLength: 128,
+            minLength: 12,
+            maxLength: 156,
             description:
               'This helps to understand what your action does. Also used by the LLM (Large Language Model) to match the action.'
           }),
@@ -297,8 +282,6 @@ export const skillSchemaObject = Type.Strict(
             })
           ),
           parameters: Type.Optional(
-            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-            // @ts-expect-error
             Type.Record(Type.String(), actionParametersType, {
               description:
                 'Parameters are used to define the data that the action expects to receive. They can be used to pass data from the utterance to the action code.'
@@ -337,12 +320,6 @@ export const skillConfigSchemaObject = Type.Strict(
       Type.Object(
         {
           type: Type.Union(skillActionTypes),
-          disable_llm_nlg: Type.Optional(
-            Type.Boolean({
-              description:
-                'Disable the LLM (Large Language Model) for NLG (Natural Language Generation) in the action.'
-            })
-          ),
           loop: Type.Optional(
             Type.Object(
               {
@@ -444,22 +421,7 @@ export const skillConfigSchemaObject = Type.Strict(
         Type.Union([Type.String(), Type.Array(Type.String())])
       )
     ),
-    entities: Type.Optional(Type.Record(Type.String(), Type.String())),
-    resolvers: Type.Optional(
-      Type.Record(
-        Type.String(),
-        Type.Object(
-          {
-            intents: globalResolverSchemaObject.properties.intents
-          },
-          { additionalProperties: false }
-        ),
-        {
-          description:
-            'You can see resolvers as utterance samples that are converted (resolved) to a value of your choice. They are very handy when skills expect specific utterances and then according to these utterances attribute a value that can be handled by the skill. If a skill action expects to receive a resolver, then Leon will convert the value for you and this value will be usable from the skill action code. Any value can be passed to resolvers which allow a large possibilities of usages.'
-        }
-      )
-    )
+    entities: Type.Optional(Type.Record(Type.String(), Type.String()))
   })
 )
 
@@ -478,8 +440,5 @@ export type SkillCustomRegexEntityTypeSchema = Static<
 >
 export type SkillCustomEnumEntityTypeSchema = Static<
   typeof skillCustomEnumEntityType
->
-export type SkillCustomLLMEntityTypeSchema = Static<
-  typeof skillCustomLLMEntityType
 >
 export type SkillAnswerConfigSchema = Static<typeof answerTypes>
